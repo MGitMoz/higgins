@@ -1,4 +1,4 @@
-/* Higgins — family command center. v0.3
+/* Higgins — family command center. v0.4
    Single-page app, no build step. All data lives in localStorage under STORE_KEY. */
 'use strict';
 
@@ -248,7 +248,7 @@ const KEYWORDS = {
   purchase: [[/\b(order|amazon|target|costco|need (a |an |new )|buy (a |an |new )|replace (my|his|her|their|the kids'?) |shoes|jacket|clothes|charger|gift|birthday present)\b/, 3]],
   event: [[/\b(appointment|appt|dentist|doctor|dr\.?|pediatrician|vet|flight|fly|trip|travel|vacation|hotel|practice|game|recital|party|meeting|conference|haircut|school|pickup|drop ?off|playdate|visit)\b/, 3]],
   task: [[/\b(clean|deep clean|replace|fix|repair|wash|vacuum|mop|dust|filter|gutters?|hvac|detector|paint|every \d+|every (day|week|month|year))\b/, 2]],
-  auto: [[/\b(oil change|tires?|car|truck|suv|van|minivan|registration|brakes?|inspection|wipers?|smog|detail)\b/, 3]],
+  auto: [[/\b(oil change|tires?|auto|car|truck|suv|van|minivan|registration|brakes?|inspection|wipers?|smog|detail)\b/, 3]],
   bill: [[/\b(pay|bill|premium|insurance|loan|mortgage|rent|tax(es)?|tuition|subscription|renew)\b/, 3], [/\$\s?\d/, 2]],
   meal: [[/\b(for dinner|dinner on|dinner (mon|tues|wednes|thurs|fri|satur|sun)day|dinner tonight|dinner tomorrow|meal plan)\b/, 5]],
   recipe: [[/\b(recipe|how to make)\b/, 4]],
@@ -258,9 +258,9 @@ const DOW = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', '
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 
 function parseCapture(raw) {
-  const text = raw.trim();
+  const text = raw.trim().replace(/\b(auto|car|truck|vehicle|student|home|personal) load\b/gi, '$1 loan').replace(/\bot be\b/gi, 'to be');
   let t = ' ' + text.toLowerCase() + ' ';
-  const out = { raw: text, date: '', time: '', amount: '', freqDays: '' };
+  const out = { raw: text, date: '', time: '', amount: '', freqDays: '', remindDays: 0 };
   let strip = [];
   // date
   let m;
@@ -294,7 +294,11 @@ function parseCapture(raw) {
   // amount
   if ((m = t.match(/\$\s?([\d,]+(?:\.\d{1,2})?)/))) { out.amount = +m[1].replace(/,/g, ''); strip.push(m[0]); }
   // recurrence
-  if ((m = t.match(/\bevery (\d+ )?(day|week|month|year)s?\b/))) {
+  if ((m = t.match(/\bremind(?:ed|er)?(?: me| us)?[^.,;]*?\b(\d+|a|an|one|two|three|four|five|six|seven|ten|fourteen)\s+(day|week)s?\s+(?:before|ahead|prior|early|in advance)\b/))) {
+    const n = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, ten: 10, fourteen: 14 }[m[1]] || +m[1];
+    out.remindDays = n * (m[2] === 'week' ? 7 : 1);
+  }
+  if ((m = t.match(/\b(?:every|each) (\d+ )?(day|week|month|year)s?\b/))) {
     const n = +(m[1] || 1); out.freqDays = n * { day: 1, week: 7, month: 30, year: 365 }[m[2]]; strip.push(m[0]);
   } else if ((m = t.match(/\b(daily|weekly|monthly|quarterly|yearly|annually)\b/))) {
     out.freqDays = { daily: 1, weekly: 7, monthly: 30, quarterly: 90, yearly: 365, annually: 365 }[m[1]]; strip.push(m[0]);
@@ -306,15 +310,16 @@ function parseCapture(raw) {
   if (out.amount) scores.purchase += 1;
   if (out.freqDays) scores.task += 2;
   if (scores.auto && scores.task) scores.auto += 2;
-  if (scores.auto && scores.bill && /insurance|loan|payment/.test(t)) scores.bill += 2;
+  if (/\b(loan|insurance|premium|mortgage|payment|bill|tuition|subscription)\b/.test(t)) scores.bill += 4; // money words beat 'car'
   let best = 'todo', bestScore = 0;
   for (const [c, s] of Object.entries(scores)) if (s > bestScore) { best = c; bestScore = s; }
   out.cat = best;
-  // clean title
-  let title = ' ' + text + ' ';
+  // clean title — drop "remind me…" clauses, then the date/amount phrases
+  let title = ' ' + text.split(/[,;]|\band\b(?=[^,;]*remind)/i).filter(seg => !/remind|heads[- ]up/i.test(seg)).join(', ') + ' ';
   strip.forEach(s => { title = title.replace(new RegExp(s.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'), ' '); });
   title = title.replace(/\b(remind me to|remember to|we need to|i need to|need to|don'?t forget to|add|please)\b/gi, ' ')
-    .replace(/\b(to|on) (the )?(grocery|shopping) list\b/gi, ' ').replace(/\s+/g, ' ').replace(/^[\s,.-]+|[\s,.-]+$/g, '');
+    .replace(/\b(to|on) (the )?(grocery|shopping) list\b/gi, ' ').replace(/\s+/g, ' ').replace(/^[\s,.-]+|[\s,.-]+$/g, '')
+    .replace(/(\s+\b(is|are|was|due|of|on|at|by|for)\b)+\s*$/i, '');
   out.title = title ? title[0].toUpperCase() + title.slice(1) : text;
   if (best === 'grocery') {
     const list = title.replace(/\b(we'?re |we are |i'?m )?(out of|running low on|low on|pick up|buy|get|grab|need)\b/gi, ' ')
@@ -346,6 +351,12 @@ const guessEventType = low => /flight|fly|trip|travel|vacation|hotel|airport/.te
 const guessBillCat = low => /insurance|premium|policy/.test(low) ? 'Insurance' : /mortgage|rent/.test(low) ? 'Mortgage / rent' : /loan|note|financing/.test(low) ? 'Loan'
   : /tax/.test(low) ? 'Tax' : /tuition|daycare|preschool|childcare/.test(low) ? 'Tuition / childcare' : /netflix|spotify|subscription|prime|hulu|disney|icloud/.test(low) ? 'Subscription'
   : /electric|gas|water|internet|phone|trash|sewer|utility/.test(low) ? 'Utility' : 'Other';
+const guessVehicle = (low, force) => state.vehicles.find(v => [v.name, v.make, v.model].some(w => w && new RegExp(`\\b${reEsc(w.toLowerCase())}\\b`).test(low)))
+  || ((force || /\b(auto|car|truck|suv|van|minivan|vehicle|registration)\b/.test(low)) && state.vehicles.length === 1 ? state.vehicles[0] : null);
+const ord = n => n + ((n % 100 >= 11 && n % 100 <= 13) ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th'));
+const billWhen = b => ({ monthly: `monthly on the ${ord(parseISO(b.nextDue).getDate())}`, quarterly: 'quarterly', semiannual: 'every 6 months', annual: `yearly on ${fmtDate(b.nextDue, { month: 'short', day: 'numeric' })}`, once: `due ${fmtDate(b.nextDue, { month: 'short', day: 'numeric' })}` }[b.freq] || '');
+const EVENT_TYPES = ['Appointment', 'Activity', 'Travel', 'School', 'Social', 'Reminder'];
+const BILL_CATS = ['Insurance', 'Loan', 'Mortgage / rent', 'Utility', 'Subscription', 'Tax', 'Tuition / childcare', 'Other'];
 const guessBillFreq = low => /annual|yearly|every year|per year|a year/.test(low) ? 'annual' : /quarter/.test(low) ? 'quarterly' : /6 months|six months|semi/.test(low) ? 'semiannual' : /one[- ]time|once/.test(low) ? 'once' : 'monthly';
 
 // Creates the item for a category straight away. Returns { summary, undo, edit }.
@@ -358,22 +369,32 @@ function fileCapture(p, cat) {
       return { summary: (p.items || [p.title]).join(', '), undo: () => { state.grocery = state.grocery.filter(g => !made.includes(g)); }, edit: () => { location.hash = '#/groceries'; } };
     }
     case 'todo': case 'task': case 'auto': {
-      const car = cat === 'auto' ? (state.vehicles.find(v => [v.name, v.make, v.model].some(w => w && low.includes(w.toLowerCase()))) || state.vehicles[0]) : null;
-      const x = { id: uid(), title: p.title, area: car ? 'auto' : 'home', zone: car ? 'Vehicles' : cat === 'todo' ? 'To-do' : guessZone(low), vehicleId: car?.id,
+      const car = cat === 'auto' ? (state.vehicles.find(v => v.id === p.vehicleId) || guessVehicle(low, true) || state.vehicles[0]) : null;
+      const who = (p.memberIds || guessMembers(low)).find(id => adults().some(m => m.id === id)) || '';
+      const x = { id: uid(), title: p.title, area: car ? 'auto' : 'home', zone: car ? 'Vehicles' : cat === 'todo' ? 'To-do' : (ZONES.includes(p.zone) ? p.zone : guessZone(low)), vehicleId: car?.id,
         freqDays: p.freqDays || 0, once: !p.freqDays, nextDue: p.date || (p.freqDays ? t : ''), effort: 1,
-        assignee: guessMembers(low).find(id => adults().some(m => m.id === id)) || '', notes: '', lastDone: '' };
+        assignee: who, notes: p.notes || '', lastDone: '' };
       state.tasks.push(x);
       return { summary: x.title + (x.nextDue ? ` · ${rel(x.nextDue)}` : '') + (x.once ? '' : ` · ${freqLabel(x.freqDays)}`), undo: pushUndo(() => state.tasks, x), edit: () => editTask(x) };
     }
     case 'event': {
-      const x = { id: uid(), title: p.title, date: p.date || t, time: p.time, endDate: '', repeat: '', type: guessEventType(low), members: guessMembers(low), location: '', notes: '' };
+      const x = { id: uid(), title: p.title, date: p.date || t, time: p.time, endDate: p.endDate || '', repeat: '', type: EVENT_TYPES.includes(p.category) ? p.category : guessEventType(low),
+        members: p.memberIds || guessMembers(low), location: '', notes: p.notes || '', remindDays: p.remindDays || 0 };
       state.events.push(x);
       return { summary: `${x.title} · ${rel(x.date)}${x.time ? ' ' + fmtTime(x.time) : ''}`, undo: pushUndo(() => state.events, x), edit: () => editEvent(x) };
     }
     case 'bill': {
-      const x = { id: uid(), name: p.title, amount: p.amount, category: guessBillCat(low), freq: guessBillFreq(low), nextDue: p.date || t, autopay: /auto-?pay/.test(low), owner: '', account: '', balance: '', notes: '', paid: [] };
+      const category = BILL_CATS.includes(p.category) ? p.category : guessBillCat(low);
+      const car = state.vehicles.find(v => v.id === p.vehicleId) || (p.ai ? null : guessVehicle(low));
+      let name = p.title;
+      if (!p.ai) name = car && /loan|insurance|registration/i.test(low) ? `Pay ${car.name} ${/loan/i.test(low) ? 'auto loan' : /insurance/i.test(low) ? 'insurance' : 'registration'}`
+        : /^pay\b/i.test(name) ? name : `Pay ${name.replace(/^./, c => c.toLowerCase())}`;
+      const freq = p.billFreq || (p.freqDays ? ({ 30: 'monthly', 90: 'quarterly', 180: 'semiannual', 365: 'annual' }[p.freqDays] || 'monthly') : guessBillFreq(low));
+      const x = { id: uid(), name, amount: p.amount, category, freq, nextDue: p.date || t, autopay: /auto-?pay/.test(low), owner: '', account: '', balance: '', notes: p.notes || '', paid: [],
+        vehicleId: car?.id || '', remindDays: p.remindDays || 3 };
       state.bills.push(x);
-      return { summary: `${x.name}${x.amount ? ' · ' + money(x.amount) : ''} · ${rel(x.nextDue)}`, undo: pushUndo(() => state.bills, x), edit: () => editBill(x) };
+      return { summary: `${x.name}${x.amount ? ' · ' + money(x.amount) : ''} · ${billWhen(x)}${p.remindDays ? ` · reminder ${p.remindDays % 7 ? p.remindDays + ' days' : p.remindDays / 7 === 1 ? 'a week' : p.remindDays / 7 + ' weeks'} before` : ''}`,
+        where: car ? `Bills · ${car.name}` : '', undo: pushUndo(() => state.bills, x), edit: () => editBill(x) };
     }
     case 'meal': {
       const date = p.date || t, prev = state.mealPlan[date];
@@ -382,14 +403,14 @@ function fileCapture(p, cat) {
       return { summary: `${r ? r.name : p.title} · ${rel(date)}`, undo: () => { if (prev) state.mealPlan[date] = prev; else delete state.mealPlan[date]; }, edit: () => editMeal(date) };
     }
     case 'purchase': {
-      const who = guessMembers(low)[0] || '';
+      const who = (p.memberIds || guessMembers(low))[0] || '';
       const x = { id: uid(), item: p.title, forMember: who, category: who && member(who)?.role === 'Kid' ? 'Kids' : 'Household', priority: /asap|soon|urgent|this week/.test(low) ? 'Soon' : 'Normal',
         price: p.amount, store: '', size: '', status: 'needed', added: t };
       state.purchases.push(x);
       return { summary: x.item, undo: pushUndo(() => state.purchases, x), edit: () => editPurchase(x) };
     }
     case 'recipe': {
-      const x = { id: uid(), name: p.title.replace(/^(recipe (for )?|how to make )/i, '').replace(/^./, c => c.toUpperCase()), favorite: false, tags: [], serves: 4, time: '', ingredients: [], steps: '', notes: '', lastMade: '', timesMade: 0, color: MEMBER_COLORS[state.recipes.length % MEMBER_COLORS.length] };
+      const x = { id: uid(), name: p.title.replace(/^(recipe (for )?|how to make )/i, '').replace(/^./, c => c.toUpperCase()), favorite: false, tags: [], serves: 4, time: '', ingredients: p.ai && p.items ? p.items : [], steps: '', notes: '', lastMade: '', timesMade: 0, color: MEMBER_COLORS[state.recipes.length % MEMBER_COLORS.length] };
       state.recipes.push(x);
       return { summary: `${x.name} — tap Edit to add ingredients`, undo: pushUndo(() => state.recipes, x), edit: () => editRecipe(x) };
     }
@@ -405,25 +426,24 @@ function fileCapture(p, cat) {
 }
 // "Changed the HVAC filter" / "paid the car insurance" logs an existing task or bill instead of creating a new one.
 const DONE_RE = /^\s*(?:(?:i|we|just|already|finally)\s+)*(changed|cleaned|replaced|did|finished|washed|vacuumed|mopped|flushed|tested|descaled|rotated|serviced|swapped|emptied|dusted|shampooed|scrubbed|wiped|checked|renewed|mowed|paid)\b/i;
-const STOP = new Set('the and for our just already today yesterday this that with from was were have has all out new got did done finally also some its'.split(' '));
+const STOP = new Set('the and for our just already today yesterday this that with from was were have has all out new got did done finally also some its pay paid'.split(' '));
 const sig = s => s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length >= 3 && !STOP.has(w)).map(w => w.slice(0, 5));
 function bestMatch(text, items, key) {
+  // names of cars and people identify *which* thing, not *what* — they can't be the only overlap
+  const names = new Set(sig([...state.vehicles.flatMap(v => [v.name, v.make, v.model]), ...state.members.map(m => m.name)].filter(Boolean).join(' ')));
   const q = new Set(sig(text)); let best = null, bs = 0;
-  items.forEach(it => { const ws = sig(key(it)); const n = ws.filter(w => q.has(w)).length; const score = n + n / Math.max(ws.length, 1); if (n && score > bs) { bs = score; best = it; } });
+  items.forEach(it => {
+    const ws = sig(key(it)), hits = ws.filter(w => q.has(w));
+    if (!hits.some(w => !names.has(w))) return;
+    const score = hits.length + hits.length / Math.max(ws.length, 1); if (score > bs) { bs = score; best = it; }
+  });
   return bs >= 1.25 ? best : null;
 }
 function tryLogDone(text) {
   const m = text.match(DONE_RE); if (!m) return null;
   const who = state.activeMember, t = today();
   const what = text.slice(m.index + m[0].length); // match on the object only, never the verb
-  if (m[1].toLowerCase() === 'paid') {
-    const b = bestMatch(what, activeBills(), b => b.name); if (!b) return null;
-    const prev = { nextDue: b.nextDue, done: b.done };
-    b.paid = b.paid || []; b.paid.unshift({ date: t, amount: b.amount, due: b.nextDue });
-    if (b.freq === 'once') b.done = true; else b.nextDue = addMonths(b.nextDue, FREQ_MONTHS[b.freq]);
-    return { cat: 'bill', summary: `✓ Paid ${b.name}${b.done ? '' : ' · next ' + fmtDate(b.nextDue, { month: 'short', day: 'numeric' })}`,
-      undo: () => { b.paid.shift(); Object.assign(b, prev); }, edit: () => editBill(b) };
-  }
+  if (m[1].toLowerCase() === 'paid') { const b = bestMatch(what, activeBills(), b => b.name); return b ? logBillPaid(b) : null; }
   const task = bestMatch(what, state.tasks, x => x.title);
   if (!task) { // nothing scheduled matches — still count the effort
     if (m[1].toLowerCase() === 'paid') return null;
@@ -431,6 +451,17 @@ function tryLogDone(text) {
     const log = { id: uid(), taskId: '', title, memberId: who, date: t, points: 1 }; state.log.unshift(log);
     return { cat: 'task', summary: `✓ ${title} · logged`, undo: () => { state.log = state.log.filter(l => l !== log); }, edit: () => { location.hash = '#/upkeep'; } };
   }
+  return logTaskDone(task);
+}
+function logBillPaid(b) {
+  const t = today(), prev = { nextDue: b.nextDue, done: b.done };
+  b.paid = b.paid || []; b.paid.unshift({ date: t, amount: b.amount, due: b.nextDue });
+  if (b.freq === 'once') b.done = true; else b.nextDue = addMonths(b.nextDue, FREQ_MONTHS[b.freq]);
+  return { cat: 'bill', summary: `✓ Paid ${b.name.replace(/^pay\s+/i, '')}${b.done ? '' : ' · next ' + fmtDate(b.nextDue, { month: 'short', day: 'numeric' })}`,
+    undo: () => { b.paid.shift(); Object.assign(b, prev); }, edit: () => editBill(b) };
+}
+function logTaskDone(task) {
+  const who = state.activeMember, t = today();
   const prev = { lastDone: task.lastDone, nextDue: task.nextDue };
   const log = { id: uid(), taskId: task.id, title: task.title, memberId: who, date: t, points: task.effort || 1 };
   state.log.unshift(log);
@@ -439,17 +470,119 @@ function tryLogDone(text) {
   return { cat: task.area === 'auto' ? 'auto' : 'task', summary: `✓ ${task.title}${task.once ? '' : ' · next ' + fmtDate(task.nextDue, { month: 'short', day: 'numeric' })}`,
     undo: () => { state.log = state.log.filter(l => l !== log); if (task.once) state.tasks.push(task); else Object.assign(task, prev); recordHealth(); }, edit: () => editTask(task) };
 }
-function captureText(text) {
+/* ---------- AI filing (Claude). The key lives only in this browser, never in backups or the repo. ---------- */
+const AI_KEY_STORE = 'higgins.anthropicKey';
+const SDK_URL = 'https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.129.0/+esm';
+const AI_MODEL = 'claude-opus-5-5';
+const getAIKey = () => { try { return localStorage.getItem(AI_KEY_STORE) || ''; } catch { return ''; } };
+const setAIKey = k => { try { if (k) localStorage.setItem(AI_KEY_STORE, k); else localStorage.removeItem(AI_KEY_STORE); } catch { /* storage blocked */ } };
+let Anthropic = null, aiClient = null, aiClientKey = '';
+async function getAIClient() {
+  const key = getAIKey(); if (!key) return null;
+  if (!Anthropic) { const mod = await import(SDK_URL); Anthropic = mod.default || mod.Anthropic; }
+  if (!aiClient || aiClientKey !== key) { aiClient = new Anthropic({ apiKey: key, dangerouslyAllowBrowser: true, maxRetries: 1, timeout: 60000 }); aiClientKey = key; }
+  return aiClient;
+}
+const AI_TYPES = ['grocery', 'todo', 'house_task', 'vehicle_task', 'event', 'bill', 'meal', 'purchase', 'recipe', 'estate_note', 'log_task_done', 'pay_bill', 'note'];
+const AI_SCHEMA = { type: 'object', additionalProperties: false, required: ['actions'], properties: { actions: { type: 'array', items: {
+  type: 'object', additionalProperties: false,
+  required: ['type', 'title', 'items', 'date', 'time', 'end_date', 'repeat_days', 'bill_frequency', 'amount', 'remind_days_before', 'vehicle_id', 'member_ids', 'zone', 'category', 'match_id', 'notes'],
+  properties: {
+    type: { type: 'string', enum: AI_TYPES }, title: { type: 'string' }, items: { type: 'array', items: { type: 'string' } },
+    date: { type: 'string' }, time: { type: 'string' }, end_date: { type: 'string' }, repeat_days: { type: 'integer' },
+    bill_frequency: { type: 'string', enum: ['monthly', 'quarterly', 'semiannual', 'annual', 'once'] }, amount: { type: 'number' }, remind_days_before: { type: 'integer' },
+    vehicle_id: { type: 'string' }, member_ids: { type: 'array', items: { type: 'string' } }, zone: { type: 'string' }, category: { type: 'string' }, match_id: { type: 'string' }, notes: { type: 'string' },
+  } } } } };
+const AI_SYSTEM = `You are Higgins, the executive assistant inside a family's household app. A parent types or dictates a quick note — often casual, with typos or speech-to-text errors. Work out what they mean and turn it into actions the app files for them. Return one action per distinct thing; most notes are a single action.
+
+Action types:
+- grocery: food or household consumables to pick up at the store. Put each item in items, cleaned up and capitalized ("Milk", "Paper towels").
+- todo: a one-off errand or chore with no schedule.
+- house_task: recurring home upkeep. Set repeat_days (7 weekly, 30 monthly, 90 quarterly, 365 yearly) and zone (Kitchen, Laundry, Floors, Bathrooms, Bedrooms, Whole house, Exterior, Safety, or General).
+- vehicle_task: car maintenance or paperwork (oil change, tires, inspection). Set vehicle_id; repeat_days if it recurs, otherwise 0.
+- event: something happening at a time or on dates — appointments, activities, school, travel. end_date for multi-day trips, member_ids for who is involved, category one of Appointment, Activity, School, Travel, Social, Reminder.
+- bill: any payment that recurs or comes due — loans, insurance, mortgage, utilities, subscriptions, taxes, tuition. Set bill_frequency, amount (0 if not given), date = the next due date, category one of Insurance, Loan, Mortgage / rent, Utility, Subscription, Tax, Tuition / childcare, Other. When the payment belongs to a car (auto loan, car insurance, registration fee), set vehicle_id.
+- meal: a dinner plan for a date; title is the dish.
+- purchase: a non-grocery thing to buy or order (shoes, a gift, a replacement part); member_ids for who it is for.
+- recipe: a recipe to save; title is the dish, ingredients in items.
+- estate_note: wills, trusts, beneficiaries, guardians, powers of attorney.
+- log_task_done: they report having done something that matches a scheduled task in the context — set match_id to that task's id.
+- pay_bill: they report having paid a bill in the context — set match_id to that bill's id.
+- note: only when nothing else fits.
+
+Titles: write each title the way a sharp executive assistant labels a list item — short, action-first, specific, sentence case. Use the household context (vehicle names, people) to make it specific. Never copy the note verbatim, and leave out filler such as "I want to be reminded". Bills start with "Pay". For example, "auto load is the 10th of each month, remind me a week before" in a household with one vehicle named Highlander becomes a bill titled "Pay Highlander auto loan", bill_frequency monthly, date the next 10th, remind_days_before 7, category Loan, vehicle_id the Highlander's id.
+
+Dates: resolve relative dates against today's date from the context, always to the next future occurrence, formatted YYYY-MM-DD; time as 24-hour HH:MM. If they ask to be reminded some time before, set remind_days_before in days; otherwise 0. Use "" for unknown strings, 0 for unknown numbers, [] for empty lists. Only use ids that appear in the context.`;
+function aiContext() {
+  const t = today();
+  return JSON.stringify({
+    today: t, weekday: fmtDate(t, { weekday: 'long' }),
+    people: state.members.map(m => ({ id: m.id, name: m.name, role: m.role || 'Parent' })),
+    vehicles: state.vehicles.map(v => ({ id: v.id, name: v.name, year: v.year, make: v.make, model: v.model })),
+    scheduled_tasks: state.tasks.map(x => ({ id: x.id, title: x.title, repeat: x.once ? 'one-time' : freqLabel(x.freqDays) })),
+    bills: activeBills().map(b => ({ id: b.id, name: b.name, due: b.nextDue })),
+    recipes: state.recipes.map(r => r.name),
+  });
+}
+async function aiInterpret(text) {
+  const client = await getAIClient(); if (!client) throw new Error('no-key');
+  const res = await client.beta.messages.create({
+    model: AI_MODEL, max_tokens: 4000,
+    betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default',
+    output_config: { effort: 'low', format: { type: 'json_schema', schema: AI_SCHEMA } },
+    system: AI_SYSTEM,
+    messages: [{ role: 'user', content: `Household context:\n${aiContext()}\n\nNote:\n${text}` }],
+  });
+  if (res.stop_reason === 'refusal') throw new Error('refusal');
+  const out = JSON.parse(res.content.filter(b => b.type === 'text').map(b => b.text).join(''));
+  return (out.actions || []).filter(a => AI_TYPES.includes(a.type));
+}
+function applyAIAction(a, raw) {
+  const okDate = d => /^\d{4}-\d{2}-\d{2}$/.test(d || '') ? d : '';
+  if (a.type === 'log_task_done') { const task = find(state.tasks, a.match_id); if (task) return { cat: task.area === 'auto' ? 'auto' : 'task', p: { raw, title: task.title }, ...logTaskDone(task) }; }
+  if (a.type === 'pay_bill') { const b = find(state.bills, a.match_id); if (b) return { cat: 'bill', p: { raw, title: b.name }, ...logBillPaid(b) }; }
+  const cat = { grocery: 'grocery', todo: 'todo', house_task: 'task', vehicle_task: 'auto', event: 'event', bill: 'bill', meal: 'meal', purchase: 'purchase', recipe: 'recipe', estate_note: 'estate' }[a.type] || 'todo';
+  const p = { raw, ai: true, title: (a.title || raw).trim(), items: a.items?.length ? a.items : null, date: okDate(a.date), time: /^\d{2}:\d{2}$/.test(a.time || '') ? a.time : '',
+    endDate: okDate(a.end_date), amount: a.amount || '', freqDays: Math.max(0, a.repeat_days || 0), billFreq: a.bill_frequency, remindDays: Math.max(0, a.remind_days_before || 0),
+    vehicleId: state.vehicles.some(v => v.id === a.vehicle_id) ? a.vehicle_id : '', memberIds: (a.member_ids || []).filter(id => member(id)),
+    zone: a.zone, category: a.category, notes: a.notes };
+  if (cat === 'estate') p.raw = [p.title, p.notes].filter(Boolean).join(' — ');
+  return { cat, p, ...fileCapture(p, cat) };
+}
+function aiErrorMessage(e) {
+  if (Anthropic && e instanceof Anthropic.AuthenticationError) return 'AI key was rejected — filed with quick rules. Check it under More → Family.';
+  if (Anthropic && e instanceof Anthropic.PermissionDeniedError) return 'That AI key lacks permission — filed with quick rules.';
+  if (Anthropic && e instanceof Anthropic.RateLimitError) return 'AI is busy right now — filed with quick rules.';
+  if (Anthropic && e instanceof Anthropic.BadRequestError) return `AI request problem (${e.message.slice(0, 80)}) — filed with quick rules.`;
+  if (Anthropic && e instanceof Anthropic.APIError) return `AI unavailable (${e.status || 'network'}) — filed with quick rules.`;
+  return 'AI unavailable — filed with quick rules.';
+}
+function pushReceipt(r) { ui.receipts.unshift({ id: uid(), ...r }); ui.receipts = ui.receipts.slice(0, 3); }
+async function captureText(text) {
+  if (getAIKey() && navigator.onLine !== false) {
+    const pending = { id: uid(), pending: true, summary: text, cat: 'note' };
+    ui.receipts.unshift(pending); renderReceipts();
+    try {
+      const acts = await aiInterpret(text);
+      ui.receipts = ui.receipts.filter(r => r !== pending);
+      if (!acts.length) throw new Error('empty');
+      acts.reverse().forEach(a => pushReceipt(applyAIAction(a, text)));
+      navigator.vibrate?.(12); commit(); return;
+    } catch (e) {
+      ui.receipts = ui.receipts.filter(r => r !== pending);
+      console.warn('AI filing failed', e);
+      toast(aiErrorMessage(e));
+    }
+  }
   const p = parseCapture(text);
   const res = tryLogDone(text) || fileCapture(p, p.cat);
-  ui.receipts.unshift({ id: uid(), p, cat: p.cat, ...res });
-  ui.receipts = ui.receipts.slice(0, 3);
+  pushReceipt({ p, cat: p.cat, ...res });
   navigator.vibrate?.(12);
   commit();
 }
 function renderReceipts() {
-  $('#receipts').innerHTML = ui.receipts.map(r => `<div class="receipt" style="border-left-color:${{ y: 'var(--yellow)', r: 'var(--red)', b: 'var(--blue)', ink: 'var(--ink)' }[CAT_SHAPE[r.cat].split(' ')[1]]}">
-    <div class="receipt-main"><span class="shape ${CAT_SHAPE[r.cat]}"></span><span class="grow"><b>${esc(r.summary)}</b> → ${CAT_SHORT[r.cat]}</span>
+  $('#receipts').innerHTML = ui.receipts.map(r => r.pending ? `<div class="receipt pending"><div class="receipt-main"><span class="spinner"></span><span class="grow">Higgins is filing “${esc(r.summary)}”…</span></div></div>` : `<div class="receipt" style="border-left-color:${{ y: 'var(--yellow)', r: 'var(--red)', b: 'var(--blue)', ink: 'var(--ink)' }[CAT_SHAPE[r.cat].split(' ')[1]]}">
+    <div class="receipt-main"><span class="shape ${CAT_SHAPE[r.cat]}"></span><span class="grow"><b>${esc(r.summary)}</b> → ${esc(r.where || CAT_SHORT[r.cat])}</span>
       <span class="receipt-actions"><button class="link" data-act="undoReceipt" data-id="${r.id}">Undo</button><button class="link" data-act="moveReceipt" data-id="${r.id}">Move</button>
       <button class="link" data-act="editReceipt" data-id="${r.id}">Edit</button><button class="iconbtn" data-act="dismissReceipt" data-id="${r.id}" title="Dismiss">✕</button></span></div>
     ${r.moving ? `<div class="movechips">${Object.entries(CAT_SHORT).filter(([k]) => k !== r.cat).map(([k, v]) => `<button class="chip" data-act="moveTo" data-id="${r.id}" data-cat="${k}">${v}</button>`).join('')}</div>` : ''}
@@ -578,7 +711,7 @@ function completeTask(id) {
 function snoozeTask(id, days = 3) { const t = state.tasks.find(x => x.id === id); t.nextDue = addDays(!t.nextDue || t.nextDue < today() ? today() : t.nextDue, days); toast(`Moved to ${fmtDate(t.nextDue)}`); commit(); }
 
 function editBill(bill, preset = {}, prefix = '', after) {
-  const v = bill || { category: 'Insurance', freq: 'monthly', nextDue: today(), autopay: false, ...preset };
+  const v = bill ? { remindDays: 3, ...bill } : { category: 'Insurance', freq: 'monthly', nextDue: today(), autopay: false, remindDays: 3, ...preset };
   openForm({
     title: bill ? 'Edit bill' : 'New bill or payment', prefix,
     fields: [
@@ -591,6 +724,8 @@ function editBill(bill, preset = {}, prefix = '', after) {
       { key: 'owner', label: 'Who handles it', type: 'select', half: true, options: memberOptions('Shared', true) },
       { key: 'account', label: 'Account / policy (last 4 only)', half: true, placeholder: '…1234' },
       { key: 'balance', label: 'Loan balance (optional)', type: 'number', half: true, step: '0.01' },
+      { key: 'vehicleId', label: 'For a vehicle?', type: 'select', half: true, options: [['', '—'], ...state.vehicles.map(v => [v.id, v.name])] },
+      { key: 'remindDays', label: 'Remind me (days before)', type: 'number', half: true },
       { key: 'notes', label: 'Notes', type: 'textarea', rows: 2, placeholder: 'Pay via, renewal date, agent phone…' },
     ],
     values: v,
@@ -788,7 +923,7 @@ const views = {
     const hour = new Date().getHours(); const greet = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
     const due = state.tasks.filter(isDue).sort(byDue);
     const evToday = eventsOn(t);
-    const billsSoon = activeBills().filter(b => b.nextDue <= addDays(t, 3)).sort((a, b) => a.nextDue.localeCompare(b.nextDue));
+    const billsSoon = activeBills().filter(b => diffDays(b.nextDue, t) <= (b.remindDays ?? 3)).sort((a, b) => a.nextDue.localeCompare(b.nextDue));
     const todos = state.tasks.filter(x => x.once && !x.nextDue);
     const meal = state.mealPlan[t]; const mealRecipe = meal?.recipeId && state.recipes.find(r => r.id === meal.recipeId);
     const weekEnd = addDays(t, 6);
@@ -799,7 +934,7 @@ const views = {
     const groceryLeft = state.grocery.filter(g => !g.done).length;
     const needed = state.purchases.filter(p => p.status === 'needed').length;
     const coming = [];
-    for (let i = 1; i < 8; i++) { const d = addDays(t, i); eventsOn(d).forEach(e => coming.push({ d, kind: 'event', e })); activeBills().filter(b => b.nextDue === d && d > addDays(t, 3)).forEach(b => coming.push({ d, kind: 'bill', b })); }
+    for (let i = 1; i < 8; i++) { const d = addDays(t, i); eventsOn(d).forEach(e => coming.push({ d, kind: 'event', e })); activeBills().filter(b => b.nextDue === d && !billsSoon.includes(b)).forEach(b => coming.push({ d, kind: 'bill', b })); }
     const eventRow = e => `<div class="row"><span class="shape ci b" style="margin:0 4px"></span><div class="body" data-act="editEvent" data-id="${e.id}" style="cursor:pointer"><div class="title">${esc(e.title)}</div><div class="meta">${e.time ? fmtTime(e.time) : 'All day'}${e.location ? ' · ' + esc(e.location) : ''}${(e.members || []).length ? ' · ' + e.members.map(memberName).join(', ') : ''}</div></div></div>`;
     const billRow = b => `<div class="row"><button class="shape tr y" data-act="payBill" data-id="${b.id}" title="Mark paid"></button><div class="body" data-act="editBill" data-id="${b.id}" style="cursor:pointer"><div class="title">${esc(b.name)}${b.amount ? ' · ' + money(b.amount) : ''}</div><div class="meta">${rel(b.nextDue)}${b.autopay ? ' · autopay' : ' · tap ▲ when paid'}</div></div></div>`;
     const todayCount = evToday.length + due.length + billsSoon.length;
@@ -869,6 +1004,7 @@ const views = {
         return `<div class="card"><div class="card-head">${ring(h, h >= 85 ? 'var(--teal)' : h >= 65 ? 'var(--mustard)' : 'var(--rust)', 56)}<div><h2>${esc(c.name)}</h2><div class="muted small">${esc([c.year, c.make, c.model].filter(Boolean).join(' ')) || 'Add year, make & model'}${c.mileage ? ` · ${Number(c.mileage).toLocaleString()} mi` : ''}${c.driver ? ` · ${esc(memberName(c.driver))}` : ''}</div></div><span class="grow"></span>
           <button class="btn sm" data-act="mileage" data-id="${c.id}">Update miles</button><button class="iconbtn" data-act="editVehicle" data-id="${c.id}">${icon('edit')}</button></div>
           ${tasks.map(t => taskRow(t)).join('') || '<div class="muted small">No tasks.</div>'}
+          ${(() => { const bl = activeBills().filter(b => b.vehicleId === c.id); return bl.length ? `<div class="section-title">Payments</div>${bl.map(b => `<div class="row" data-act="editBill" data-id="${b.id}" style="cursor:pointer"><span class="shape tr y"></span><div class="body"><div class="title">${esc(b.name)}</div><div class="meta">${b.amount ? money(b.amount) + ' · ' : ''}${billWhen(b)}</div></div><span class="pill ${dueTone(b.nextDue)}">${rel(b.nextDue)}</span></div>`).join('')}` : ''; })()}
           ${c.notes ? `<div class="notice" style="margin-top:12px">${esc(c.notes)}</div>` : ''}</div>`;
       }).join('')}</div>` : `<div class="card empty"><h3>No vehicles yet</h3>Add one and Higgins sets up a starter schedule (oil, tires, wipers, registration).</div>`) +
       `<div class="notice" style="margin-top:20px">Insurance and car loans live under <a href="#/money">Bills</a> so all payments are in one place. Tip: log mileage monthly — the next release can switch oil changes to "every 5,000 mi or 6 months, whichever first".</div>`;
@@ -1019,6 +1155,11 @@ const views = {
             <div class="field half" style="justify-content:end"><button class="btn primary">Save</button></div></form></div>
         <div class="card"><div class="card-head"><h2>Milestones</h2><span class="grow"></span><span class="muted small">${Object.keys(state.milestones).length} of ${MILESTONES.length}</span></div>
           ${MILESTONES.map(m => `<div class="milestone-row"><span class="medal ${state.milestones[m.id] ? 'earned' : ''}">${icon('medal')}</span><div><div class="title" style="font-weight:500">${esc(m.name)}</div><div class="small muted">${esc(m.desc)}${state.milestones[m.id] ? ' · ' + fmtDate(state.milestones[m.id], { month: 'short', day: 'numeric', year: 'numeric' }) : ''}</div></div></div>`).join('')}</div>
+        <div class="card span2"><div class="card-head"><h2>AI filing</h2><span class="grow"></span><span class="pill ${getAIKey() ? 'olive' : ''}">${getAIKey() ? 'On' : 'Off'}</span></div>
+          <p class="muted" style="margin-top:0">With AI on, Higgins reads each note with Claude — it understands typos, dates like “the 10th of each month”, reminders, and your cars and people, and writes a proper title (“Pay Highlander auto loan”). Without it, Higgins uses quick keyword rules. Each note costs roughly 1–2¢ on your Anthropic account. The note’s text and a summary of your lists are sent to Anthropic when you file; your key stays on this device and is never included in backups.</p>
+          <form data-form="aikey" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><input name="key" type="password" autocomplete="off" class="search" style="flex:1;min-width:220px" placeholder="${getAIKey() ? 'Key saved — paste a new one to replace' : 'Paste your Anthropic API key'}">
+            <button class="btn primary">Save key</button>${getAIKey() ? '<button type="button" class="btn" data-act="testAI">Test</button><button type="button" class="btn ghost danger" data-act="removeAI">Remove</button>' : ''}</form>
+          <div class="small muted" style="margin-top:8px">Create a key at console.anthropic.com → API keys, and set a monthly spend limit there.</div></div>
         <div class="card span2"><div class="card-head"><h2>Your data</h2></div>
           <p class="muted" style="margin-top:0">Higgins keeps everything on this device only. Export a backup now and then (save it to Files or iCloud Drive) — it’s how you’d move to a new phone, or into sync later.</p>
           <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-act="exportData">Export backup (.json)</button><label class="btn">Import backup<input type="file" accept=".json" data-import hidden></label><span class="grow"></span><button class="btn ghost danger" data-act="resetData">Reset everything</button></div></div>
@@ -1031,9 +1172,15 @@ const find = (arr, id) => arr.find(x => x.id === id);
 const actions = {
   doneTask: d => completeTask(d.id),
   voice: () => startVoice(),
+  removeAI: () => { setAIKey(''); aiClient = null; toast('AI filing turned off'); render(); },
+  testAI: async () => {
+    toast('Testing…');
+    try { const acts = await aiInterpret('we are out of milk'); toast(acts.length ? `Works — it read that as: ${acts[0].type}, “${acts[0].title || acts[0].items.join(', ')}”` : 'Connected, but got an empty answer'); }
+    catch (e) { console.warn(e); toast(aiErrorMessage(e).replace(' — filed with quick rules', '')); }
+  },
   undoReceipt: d => { const r = find(ui.receipts, d.id); r.undo(); ui.receipts = ui.receipts.filter(x => x !== r); toast('Undone'); commit(); },
   moveReceipt: d => { const r = find(ui.receipts, d.id); r.moving = !r.moving; renderReceipts(); },
-  moveTo: d => { const r = find(ui.receipts, d.id); r.undo(); Object.assign(r, fileCapture(r.p, d.cat), { cat: d.cat, moving: false }); toast(`Moved to ${CAT_SHORT[d.cat]}`); commit(); },
+  moveTo: d => { const r = find(ui.receipts, d.id); r.undo(); Object.assign(r, { where: '' }, fileCapture(r.p, d.cat), { cat: d.cat, moving: false }); toast(`Moved to ${CAT_SHORT[d.cat]}`); commit(); },
   editReceipt: d => find(ui.receipts, d.id).edit(),
   dismissReceipt: d => { ui.receipts = ui.receipts.filter(x => x.id !== d.id); renderReceipts(); },
   snooze: d => snoozeTask(d.id),
@@ -1179,6 +1326,7 @@ document.addEventListener('submit', e => {
   const f = e.target.dataset.form; if (!f) return;
   e.preventDefault();
   if (f === 'grocery') { const v = e.target.elements.item.value; v.split(',').forEach(s => addGrocery(s)); commit(); $('[data-form="grocery"] input')?.focus(); }
+  if (f === 'aikey') { const k = e.target.elements.key.value.trim(); if (!k) return; setAIKey(k); aiClient = null; toast('Key saved — AI filing is on'); render(); return; }
   if (f === 'settings') { const el = e.target.elements; Object.assign(state.settings, { familyName: el.familyName.value.trim(), weeklyGoal: Number(el.weeklyGoal.value) || 30, theme: el.theme.value }); toast('Saved'); commit(); }
 });
 document.addEventListener('input', e => {

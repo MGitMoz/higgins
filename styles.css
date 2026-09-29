@@ -87,6 +87,9 @@ a { color: var(--blue); }
 .receipt-main .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .receipt button.link { border: 0; background: none; font-family: var(--display); font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; cursor: pointer; padding: 6px 7px; color: var(--ink); border-radius: 8px; }
 .receipt button.link:hover { background: var(--surface-2); }
+.receipt.pending { border-left-color: var(--ink-3); color: var(--ink-2); }
+.spinner { width: 16px; height: 16px; border-radius: 50%; border: 2.5px solid var(--line); border-top-color: var(--red); animation: spin .8s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .receipt-actions { display: flex; align-items: center; flex: none; }
 .receipt .movechips { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 0 2px; }
 @keyframes drop { from { transform: translateY(-6px); } }
