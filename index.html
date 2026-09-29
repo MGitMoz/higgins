@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#F2ECE1" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#181614" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Higgins">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="icon" type="image/png" href="icons/favicon-32.png">
+  <title>Higgins</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&family=Fraunces:opsz,wght@9..144,400;9..144,500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <circle cx="16" cy="16" r="15" fill="var(--teal)"/>
+          <path d="M8 17 16 9l8 8v7H8z" fill="var(--bg)"/>
+          <circle cx="16" cy="19" r="3" fill="var(--mustard)"/>
+        </svg>
+        <div><div class="brand-name">Higgins</div><div class="brand-sub" id="familyName"></div></div>
+      </div>
+      <nav class="nav" id="nav"></nav>
+      <div class="whoami">
+        <label for="who">Logging as</label>
+        <select id="who"></select>
+      </div>
+    </aside>
+    <main class="main">
+      <div class="topbar">
+        <form class="capture" id="captureForm" autocomplete="off">
+          <input id="captureInput" placeholder="Capture anything — “we’re out of milk and eggs”, “dentist Tuesday at 3pm”, “pay car insurance $140 on the 15th”">
+          <button type="button" class="mic" id="micBtn" title="Speak"></button>
+          <button class="btn primary">File it</button>
+        </form>
+        <div class="capture-hint" id="captureHint">Type or speak. Higgins works out where it belongs, and you confirm before it's saved.</div>
+      </div>
+      <div id="view"></div>
+    </main>
+  </div>
+  <nav class="tabbar" id="tabbar"></nav>
+  <dialog id="modal"></dialog>
+  <div class="toast" id="toast"></div>
+  <script src="app.js"></script>
+</body>
+</html>
