@@ -1,4 +1,4 @@
-/* Higgins — family command center. v0.1
+/* Higgins — family command center. v0.3
    Single-page app, no build step. All data lives in localStorage under STORE_KEY. */
 'use strict';
 
@@ -29,8 +29,9 @@ function rel(s) {
   if (n < 7) return `In ${n} days`;
   return fmtDate(s);
 }
-function dueTone(s) { const n = diffDays(s, today()); return n < 0 ? 'rust' : n <= 3 ? 'mustard' : ''; }
+function dueTone(s) { if (!s) return ''; const n = diffDays(s, today()); return n < 0 ? 'rust' : n <= 3 ? 'mustard' : ''; }
 function freqLabel(days) {
+  if (!days) return 'One-time';
   if (days % 365 === 0) return days === 365 ? 'Yearly' : `Every ${days / 365} yrs`;
   if (days % 30 === 0) return days === 30 ? 'Monthly' : `Every ${days / 30} mo`;
   if (days % 7 === 0) return days === 7 ? 'Weekly' : `Every ${days / 7} wks`;
@@ -64,7 +65,8 @@ const icon = (n, cls = 'ico') => `<svg class="${cls}" viewBox="0 0 24 24" aria-h
 
 /* ================= Seed data ================= */
 const ZONES = ['Kitchen', 'Laundry', 'Floors', 'Bathrooms', 'Bedrooms', 'Whole house', 'Exterior', 'Safety'];
-const MEMBER_COLORS = ['#1F5F5B', '#BF5436', '#D39B2A', '#6C7A36', '#4F7FA0', '#8A5A83'];
+const MEMBER_COLORS = ['#2553A6', '#D7412B', '#F2B705', '#2F7D57', '#1D1A17', '#E07B39'];
+const OLD_COLORS = ['#1F5F5B', '#BF5436', '#D39B2A', '#6C7A36', '#4F7FA0', '#8A5A83'];
 
 const SEED_TASKS = [
   ['Clean dishwasher filter', 'Kitchen', 30, 1],
@@ -138,7 +140,7 @@ function seedState() {
   }));
   return {
     version: VERSION,
-    settings: { familyName: '', theme: 'auto', weeklyGoal: 30 },
+    settings: { familyName: '', theme: 'light', weeklyGoal: 30 },
     members, activeMember: members[0].id,
     tasks, log: [], vehicles: [car], bills: [],
     estate: {
@@ -166,6 +168,14 @@ let state;
 function load() {
   try { state = JSON.parse(localStorage.getItem(STORE_KEY)); } catch { state = null; }
   if (!state || state.version !== VERSION) state = seedState();
+  // v0.3 migrations: light by default, new palette
+  if (!state.settings.v03) {
+    state.settings.v03 = true;
+    if (state.settings.theme === 'auto') state.settings.theme = 'light';
+    const swap = c => { const i = OLD_COLORS.indexOf(c); return i >= 0 ? MEMBER_COLORS[i] : c; };
+    state.members.forEach(m => m.color = swap(m.color));
+    state.recipes.forEach(r => r.color = swap(r.color));
+  }
 }
 function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { toast('Could not save — storage unavailable'); } }
 const member = id => state.members.find(m => m.id === id);
@@ -173,6 +183,9 @@ const memberName = id => member(id)?.name || '';
 const memberDot = id => { const m = member(id); return m ? `<span class="dot" style="background:${m.color}" title="${esc(m.name)}"></span>` : ''; };
 const memberOptions = (withAnyone = 'Anyone', adultsOnly = false) => [['', withAnyone], ...state.members.filter(m => !adultsOnly || m.role !== 'Kid').map(m => [m.id, m.name])];
 const adults = () => state.members.filter(m => m.role !== 'Kid');
+const isOverdue = t => !!t.nextDue && t.nextDue < today();
+const isDue = t => !!t.nextDue && t.nextDue <= today();
+const byDue = (a, b) => (a.nextDue || '9999').localeCompare(b.nextDue || '9999');
 
 /* ================= Scoring & gamification ================= */
 function taskHealth(t) {
@@ -180,7 +193,7 @@ function taskHealth(t) {
   if (over <= 0) return 1;
   return Math.max(0, 1 - over / Math.max(t.freqDays, 7));
 }
-function healthOf(tasks) { return tasks.length ? Math.round(100 * tasks.reduce((a, t) => a + taskHealth(t), 0) / tasks.length) : 100; }
+function healthOf(all) { const tasks = all.filter(t => !t.once); return tasks.length ? Math.round(100 * tasks.reduce((a, t) => a + taskHealth(t), 0) / tasks.length) : 100; }
 const houseHealth = () => healthOf(state.tasks.filter(t => t.area === 'home'));
 function recordHealth() {
   state.healthHistory[today()] = houseHealth();
@@ -294,7 +307,7 @@ function parseCapture(raw) {
   if (out.freqDays) scores.task += 2;
   if (scores.auto && scores.task) scores.auto += 2;
   if (scores.auto && scores.bill && /insurance|loan|payment/.test(t)) scores.bill += 2;
-  let best = 'note', bestScore = 0;
+  let best = 'todo', bestScore = 0;
   for (const [c, s] of Object.entries(scores)) if (s > bestScore) { best = c; bestScore = s; }
   out.cat = best;
   // clean title
@@ -313,51 +326,164 @@ function parseCapture(raw) {
   return out;
 }
 
-function openCapture(p, cat = p.cat) {
-  const refile = `<div class="refile">Filing to <select data-refile>${Object.entries(CATS).map(([k, v]) => `<option value="${k}" ${k === cat ? 'selected' : ''}>${v}</option>`).join('')}</select><span class="muted">— change it if Higgins guessed wrong.</span></div>`;
-  const v = { title: p.title, date: p.date, time: p.time };
-  const done = () => { state.inbox = state.inbox.filter(i => i.id !== p.inboxId); };
-  const editors = {
-    grocery: () => openForm({ title: 'Add to grocery list', prefix: refile, fields: [{ key: 'items', label: 'Items (one per line)', type: 'textarea', hint: 'Aisles are sorted automatically.' }],
-      values: { items: (p.items || [p.title]).join('\n') }, onSave: o => { o.items.split('\n').map(s => s.trim()).filter(Boolean).forEach(addGrocery); done(); toast('Added to grocery list'); } }),
-    purchase: () => editPurchase(null, { item: p.title, price: p.amount }, refile, done),
-    event: () => editEvent(null, { ...v, date: p.date || today() }, refile, done),
-    task: () => editTask(null, { title: p.title, freqDays: p.freqDays || 30, nextDue: p.date || today(), area: 'home' }, refile, done),
-    auto: () => editTask(null, { title: p.title, freqDays: p.freqDays || 180, nextDue: p.date || today(), area: 'auto' }, refile, done),
-    bill: () => editBill(null, { name: p.title, amount: p.amount, nextDue: p.date || today() }, refile, done),
-    meal: () => editMeal(p.date || today(), { text: p.title }, refile, done),
-    recipe: () => editRecipe(null, { name: p.title }, refile, done),
-    estate: () => openForm({ title: 'Family planning note', prefix: refile, fields: [{ key: 'text', label: 'Note', type: 'textarea' }], values: { text: p.raw },
-      onSave: o => { state.estate.notes.unshift({ id: uid(), text: o.text, date: today() }); done(); toast('Saved to Family planning'); } }),
-    note: () => openForm({ title: 'Save to inbox', prefix: refile, fields: [{ key: 'text', label: 'Note', type: 'textarea', hint: 'Unsorted notes wait on the Home screen until you file them.' }], values: { text: p.raw },
-      onSave: o => { if (!p.inboxId) state.inbox.unshift({ id: uid(), text: o.text, date: today() }); else state.inbox.find(i => i.id === p.inboxId).text = o.text; toast('Saved to inbox'); } }),
-  };
-  editors[cat]();
-  const sel = $('[data-refile]');
-  if (sel) sel.onchange = () => { closeModal(); openCapture(p, sel.value); };
+const CAT_SHORT = { grocery: 'Groceries', todo: 'To-dos', task: 'House', auto: 'Vehicles', event: 'Calendar', bill: 'Bills', meal: 'Dinner plan', purchase: 'To buy', recipe: 'Recipes', estate: 'Family plan', note: 'Inbox' };
+const CAT_SHAPE = { grocery: 'ci y', todo: 'sq r', task: 'sq r', auto: 'sq ink', event: 'ci b', bill: 'tr y', meal: 'ci r', purchase: 'ci ink', recipe: 'ci r', estate: 'sq b', note: 'sq ink' };
+const reEsc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const ZONE_WORDS = [
+  ['Kitchen', /dishwasher|fridge|refrigerator|freezer|oven|stove|range|microwave|sink|disposal|kitchen|coffee|toaster/],
+  ['Laundry', /washer|dryer|laundry|lint/],
+  ['Floors', /vacuum|mop|carpet|rug|floor|baseboard/],
+  ['Bathrooms', /bath|shower|toilet|tub|vanity/],
+  ['Bedrooms', /bed|mattress|sheets|pillow|closet/],
+  ['Safety', /smoke|detector|extinguisher|alarm|carbon monoxide|\bco\b/],
+  ['Exterior', /gutter|lawn|yard|deck|fence|roof|garage|driveway|sprinkler|pool|patio|mow|leaves|snow|siding|hose/],
+  ['Whole house', /hvac|furnace|\bac\b|air condition|water heater|window|paint|filter|vent|fan|outlet|light|bulb|door|lock|plumb|leak/],
+];
+const guessZone = low => (ZONE_WORDS.find(([, re]) => re.test(low)) || ['General'])[0];
+const guessMembers = low => state.members.filter(m => m.name && new RegExp(`\\b${reEsc(m.name.toLowerCase())}('s)?\\b`).test(low)).map(m => m.id);
+const guessEventType = low => /flight|fly|trip|travel|vacation|hotel|airport/.test(low) ? 'Travel' : /school|teacher|conference/.test(low) ? 'School'
+  : /practice|game|lesson|recital|class|camp|tournament/.test(low) ? 'Activity' : /party|visit|playdate|dinner with|bbq|wedding|shower/.test(low) ? 'Social' : 'Appointment';
+const guessBillCat = low => /insurance|premium|policy/.test(low) ? 'Insurance' : /mortgage|rent/.test(low) ? 'Mortgage / rent' : /loan|note|financing/.test(low) ? 'Loan'
+  : /tax/.test(low) ? 'Tax' : /tuition|daycare|preschool|childcare/.test(low) ? 'Tuition / childcare' : /netflix|spotify|subscription|prime|hulu|disney|icloud/.test(low) ? 'Subscription'
+  : /electric|gas|water|internet|phone|trash|sewer|utility/.test(low) ? 'Utility' : 'Other';
+const guessBillFreq = low => /annual|yearly|every year|per year|a year/.test(low) ? 'annual' : /quarter/.test(low) ? 'quarterly' : /6 months|six months|semi/.test(low) ? 'semiannual' : /one[- ]time|once/.test(low) ? 'once' : 'monthly';
+
+// Creates the item for a category straight away. Returns { summary, undo, edit }.
+function fileCapture(p, cat) {
+  const low = p.raw.toLowerCase(), t = today();
+  const pushUndo = (arr, x) => () => { const a = arr(); const i = a.indexOf(x); if (i >= 0) a.splice(i, 1); };
+  switch (cat) {
+    case 'grocery': {
+      const made = (p.items || [p.title]).map(i => addGrocery(i)).filter(Boolean);
+      return { summary: (p.items || [p.title]).join(', '), undo: () => { state.grocery = state.grocery.filter(g => !made.includes(g)); }, edit: () => { location.hash = '#/groceries'; } };
+    }
+    case 'todo': case 'task': case 'auto': {
+      const car = cat === 'auto' ? (state.vehicles.find(v => [v.name, v.make, v.model].some(w => w && low.includes(w.toLowerCase()))) || state.vehicles[0]) : null;
+      const x = { id: uid(), title: p.title, area: car ? 'auto' : 'home', zone: car ? 'Vehicles' : cat === 'todo' ? 'To-do' : guessZone(low), vehicleId: car?.id,
+        freqDays: p.freqDays || 0, once: !p.freqDays, nextDue: p.date || (p.freqDays ? t : ''), effort: 1,
+        assignee: guessMembers(low).find(id => adults().some(m => m.id === id)) || '', notes: '', lastDone: '' };
+      state.tasks.push(x);
+      return { summary: x.title + (x.nextDue ? ` · ${rel(x.nextDue)}` : '') + (x.once ? '' : ` · ${freqLabel(x.freqDays)}`), undo: pushUndo(() => state.tasks, x), edit: () => editTask(x) };
+    }
+    case 'event': {
+      const x = { id: uid(), title: p.title, date: p.date || t, time: p.time, endDate: '', repeat: '', type: guessEventType(low), members: guessMembers(low), location: '', notes: '' };
+      state.events.push(x);
+      return { summary: `${x.title} · ${rel(x.date)}${x.time ? ' ' + fmtTime(x.time) : ''}`, undo: pushUndo(() => state.events, x), edit: () => editEvent(x) };
+    }
+    case 'bill': {
+      const x = { id: uid(), name: p.title, amount: p.amount, category: guessBillCat(low), freq: guessBillFreq(low), nextDue: p.date || t, autopay: /auto-?pay/.test(low), owner: '', account: '', balance: '', notes: '', paid: [] };
+      state.bills.push(x);
+      return { summary: `${x.name}${x.amount ? ' · ' + money(x.amount) : ''} · ${rel(x.nextDue)}`, undo: pushUndo(() => state.bills, x), edit: () => editBill(x) };
+    }
+    case 'meal': {
+      const date = p.date || t, prev = state.mealPlan[date];
+      const r = state.recipes.find(r => r.name.toLowerCase().includes(p.title.toLowerCase()) || p.title.toLowerCase().includes(r.name.toLowerCase()));
+      state.mealPlan[date] = r ? { recipeId: r.id, text: '' } : { text: p.title };
+      return { summary: `${r ? r.name : p.title} · ${rel(date)}`, undo: () => { if (prev) state.mealPlan[date] = prev; else delete state.mealPlan[date]; }, edit: () => editMeal(date) };
+    }
+    case 'purchase': {
+      const who = guessMembers(low)[0] || '';
+      const x = { id: uid(), item: p.title, forMember: who, category: who && member(who)?.role === 'Kid' ? 'Kids' : 'Household', priority: /asap|soon|urgent|this week/.test(low) ? 'Soon' : 'Normal',
+        price: p.amount, store: '', size: '', status: 'needed', added: t };
+      state.purchases.push(x);
+      return { summary: x.item, undo: pushUndo(() => state.purchases, x), edit: () => editPurchase(x) };
+    }
+    case 'recipe': {
+      const x = { id: uid(), name: p.title.replace(/^(recipe (for )?|how to make )/i, '').replace(/^./, c => c.toUpperCase()), favorite: false, tags: [], serves: 4, time: '', ingredients: [], steps: '', notes: '', lastMade: '', timesMade: 0, color: MEMBER_COLORS[state.recipes.length % MEMBER_COLORS.length] };
+      state.recipes.push(x);
+      return { summary: `${x.name} — tap Edit to add ingredients`, undo: pushUndo(() => state.recipes, x), edit: () => editRecipe(x) };
+    }
+    case 'estate': {
+      const x = { id: uid(), text: p.raw, date: t }; state.estate.notes.unshift(x);
+      return { summary: p.raw, undo: pushUndo(() => state.estate.notes, x), edit: () => { location.hash = '#/planning'; } };
+    }
+    default: {
+      const x = { id: uid(), text: p.raw, date: t }; state.inbox.unshift(x);
+      return { summary: p.raw, undo: pushUndo(() => state.inbox, x), edit: () => { location.hash = '#/home'; } };
+    }
+  }
+}
+// "Changed the HVAC filter" / "paid the car insurance" logs an existing task or bill instead of creating a new one.
+const DONE_RE = /^\s*(?:(?:i|we|just|already|finally)\s+)*(changed|cleaned|replaced|did|finished|washed|vacuumed|mopped|flushed|tested|descaled|rotated|serviced|swapped|emptied|dusted|shampooed|scrubbed|wiped|checked|renewed|mowed|paid)\b/i;
+const STOP = new Set('the and for our just already today yesterday this that with from was were have has all out new got did done finally also some its'.split(' '));
+const sig = s => s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length >= 3 && !STOP.has(w)).map(w => w.slice(0, 5));
+function bestMatch(text, items, key) {
+  const q = new Set(sig(text)); let best = null, bs = 0;
+  items.forEach(it => { const ws = sig(key(it)); const n = ws.filter(w => q.has(w)).length; const score = n + n / Math.max(ws.length, 1); if (n && score > bs) { bs = score; best = it; } });
+  return bs >= 1.25 ? best : null;
+}
+function tryLogDone(text) {
+  const m = text.match(DONE_RE); if (!m) return null;
+  const who = state.activeMember, t = today();
+  const what = text.slice(m.index + m[0].length); // match on the object only, never the verb
+  if (m[1].toLowerCase() === 'paid') {
+    const b = bestMatch(what, activeBills(), b => b.name); if (!b) return null;
+    const prev = { nextDue: b.nextDue, done: b.done };
+    b.paid = b.paid || []; b.paid.unshift({ date: t, amount: b.amount, due: b.nextDue });
+    if (b.freq === 'once') b.done = true; else b.nextDue = addMonths(b.nextDue, FREQ_MONTHS[b.freq]);
+    return { cat: 'bill', summary: `✓ Paid ${b.name}${b.done ? '' : ' · next ' + fmtDate(b.nextDue, { month: 'short', day: 'numeric' })}`,
+      undo: () => { b.paid.shift(); Object.assign(b, prev); }, edit: () => editBill(b) };
+  }
+  const task = bestMatch(what, state.tasks, x => x.title);
+  if (!task) { // nothing scheduled matches — still count the effort
+    if (m[1].toLowerCase() === 'paid') return null;
+    const title = text.trim().replace(/^./, c => c.toUpperCase());
+    const log = { id: uid(), taskId: '', title, memberId: who, date: t, points: 1 }; state.log.unshift(log);
+    return { cat: 'task', summary: `✓ ${title} · logged`, undo: () => { state.log = state.log.filter(l => l !== log); }, edit: () => { location.hash = '#/upkeep'; } };
+  }
+  const prev = { lastDone: task.lastDone, nextDue: task.nextDue };
+  const log = { id: uid(), taskId: task.id, title: task.title, memberId: who, date: t, points: task.effort || 1 };
+  state.log.unshift(log);
+  if (task.once) state.tasks = state.tasks.filter(x => x !== task); else { task.lastDone = t; task.nextDue = addDays(t, task.freqDays); }
+  recordHealth();
+  return { cat: task.area === 'auto' ? 'auto' : 'task', summary: `✓ ${task.title}${task.once ? '' : ' · next ' + fmtDate(task.nextDue, { month: 'short', day: 'numeric' })}`,
+    undo: () => { state.log = state.log.filter(l => l !== log); if (task.once) state.tasks.push(task); else Object.assign(task, prev); recordHealth(); }, edit: () => editTask(task) };
+}
+function captureText(text) {
+  const p = parseCapture(text);
+  const res = tryLogDone(text) || fileCapture(p, p.cat);
+  ui.receipts.unshift({ id: uid(), p, cat: p.cat, ...res });
+  ui.receipts = ui.receipts.slice(0, 3);
+  navigator.vibrate?.(12);
+  commit();
+}
+function renderReceipts() {
+  $('#receipts').innerHTML = ui.receipts.map(r => `<div class="receipt" style="border-left-color:${{ y: 'var(--yellow)', r: 'var(--red)', b: 'var(--blue)', ink: 'var(--ink)' }[CAT_SHAPE[r.cat].split(' ')[1]]}">
+    <div class="receipt-main"><span class="shape ${CAT_SHAPE[r.cat]}"></span><span class="grow"><b>${esc(r.summary)}</b> → ${CAT_SHORT[r.cat]}</span>
+      <span class="receipt-actions"><button class="link" data-act="undoReceipt" data-id="${r.id}">Undo</button><button class="link" data-act="moveReceipt" data-id="${r.id}">Move</button>
+      <button class="link" data-act="editReceipt" data-id="${r.id}">Edit</button><button class="iconbtn" data-act="dismissReceipt" data-id="${r.id}" title="Dismiss">✕</button></span></div>
+    ${r.moving ? `<div class="movechips">${Object.entries(CAT_SHORT).filter(([k]) => k !== r.cat).map(([k, v]) => `<button class="chip" data-act="moveTo" data-id="${r.id}" data-cat="${k}">${v}</button>`).join('')}</div>` : ''}
+  </div>`).join('');
 }
 
-function initCapture() {
-  const form = $('#captureForm'), input = $('#captureInput'), mic = $('#micBtn');
-  mic.innerHTML = icon('mic');
-  form.onsubmit = e => { e.preventDefault(); const v = input.value.trim(); if (!v) return; input.value = ''; openCapture(parseCapture(v)); };
+let recognizer = null;
+function startVoice() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) { mic.title = 'Voice input needs Chrome, Edge or Safari'; mic.onclick = () => toast('Voice input isn’t supported in this browser — try Chrome or Safari'); return; }
-  let rec = null;
-  mic.onclick = () => {
-    if (rec) { rec.stop(); return; }
-    rec = new SR(); rec.lang = navigator.language || 'en-US'; rec.interimResults = true; rec.continuous = false;
-    mic.classList.add('listening'); $('#captureHint').textContent = 'Listening… speak naturally, then pause.';
-    let finalText = '';
-    rec.onresult = e => { const r = [...e.results].map(x => x[0].transcript).join(' '); input.value = r; if (e.results[e.results.length - 1].isFinal) finalText = r; };
-    rec.onerror = e => toast(e.error === 'not-allowed' ? 'Microphone permission was denied' : 'Didn’t catch that — try again');
-    rec.onend = () => {
-      mic.classList.remove('listening'); rec = null;
-      $('#captureHint').textContent = 'Type or speak. Higgins works out where it belongs, and you confirm before it\'s saved.';
-      if (finalText.trim()) { input.value = ''; openCapture(parseCapture(finalText)); }
-    };
-    rec.start();
+  const input = $('#captureInput');
+  const fallback = () => { input.focus(); toast('Tap the 🎤 on your keyboard to dictate'); };
+  if (!SR) return fallback();
+  if (recognizer) { recognizer.stop(); return; }
+  const rec = recognizer = new SR(); rec.lang = navigator.language || 'en-US'; rec.interimResults = true; rec.continuous = false;
+  const btns = [$('#micBtn'), $('.fab')].filter(Boolean);
+  btns.forEach(b => b.classList.add('listening'));
+  input.placeholder = 'Listening…';
+  let finalText = '', failed = false;
+  rec.onresult = e => { const r = [...e.results].map(x => x[0].transcript).join(' '); input.value = r; if (e.results[e.results.length - 1].isFinal) finalText = r; };
+  rec.onerror = e => { failed = true; if (e.error === 'not-allowed' || e.error === 'service-not-allowed') fallback(); else if (e.error !== 'aborted') toast('Didn’t catch that — try again'); };
+  rec.onend = () => {
+    recognizer = null; [$('#micBtn'), $('.fab')].filter(Boolean).forEach(b => b.classList.remove('listening'));
+    input.placeholder = placeholder();
+    if (finalText.trim()) { input.value = ''; captureText(finalText); } else if (!failed) input.value = '';
   };
+  try { rec.start(); } catch { recognizer = null; fallback(); }
+}
+const placeholder = () => matchMedia('(max-width: 860px)').matches ? 'Tell Higgins anything…' : 'Tell Higgins anything — “out of milk and eggs”, “dentist Tuesday 3pm”, “car insurance $140 on the 15th”';
+function initCapture() {
+  const input = $('#captureInput');
+  $('#micBtn').innerHTML = icon('mic');
+  input.placeholder = placeholder();
+  $('#captureForm').onsubmit = e => { e.preventDefault(); const v = input.value.trim(); if (!v) return; input.value = ''; input.blur(); captureText(v); };
+  $('#micBtn').onclick = startVoice;
 }
 
 /* ================= Modal & form builder ================= */
@@ -404,6 +530,7 @@ function commit() { checkMilestones(); save(); render(); }
 
 /* ================= Editors ================= */
 function freqFields(days) {
+  if (!days) return { freqN: '', freqUnit: 'once' };
   const unit = days % 365 === 0 ? 'years' : days % 30 === 0 ? 'months' : days % 7 === 0 ? 'weeks' : 'days';
   const n = days / { days: 1, weeks: 7, months: 30, years: 365 }[unit];
   return { freqN: n, freqUnit: unit };
@@ -411,7 +538,7 @@ function freqFields(days) {
 const toDays = (n, unit) => Math.max(1, Math.round(Number(n || 1) * { days: 1, weeks: 7, months: 30, years: 365 }[unit]));
 
 function editTask(task, preset = {}, prefix = '', after) {
-  const v = task || { area: 'home', zone: 'Kitchen', freqDays: 30, effort: 1, nextDue: today(), ...preset };
+  const v = task || { area: 'home', zone: 'General', freqDays: 30, effort: 1, nextDue: today(), ...preset };
   const isAuto = v.area === 'auto';
   const fields = [
     { key: 'title', label: 'Task', required: true },
@@ -419,18 +546,19 @@ function editTask(task, preset = {}, prefix = '', after) {
       : { key: 'zone', label: 'Zone', half: true, list: ZONES },
     { key: 'assignee', label: 'Usually done by', type: 'select', half: true, options: memberOptions('Anyone', true) },
     { key: 'freqN', label: 'Repeat every', type: 'number', half: true, step: 'any' },
-    { key: 'freqUnit', label: ' ', type: 'select', half: true, options: ['days', 'weeks', 'months', 'years'] },
-    { key: 'nextDue', label: 'Next due', type: 'date', half: true },
+    { key: 'freqUnit', label: ' ', type: 'select', half: true, options: [['once', 'Doesn’t repeat'], 'days', 'weeks', 'months', 'years'] },
+    { key: 'nextDue', label: 'Due', type: 'date', half: true },
     { key: 'effort', label: 'Effort', type: 'select', half: true, options: [[1, 'Quick — 1 pt'], [2, 'Moderate — 2 pts'], [3, 'Big job — 3 pts']] },
     { key: 'notes', label: 'Notes, how-to, part numbers', type: 'textarea', rows: 3 },
   ];
   if (isAuto && !state.vehicles.length) { toast('Add a vehicle first'); location.hash = '#/auto'; return; }
   openForm({
-    title: task ? 'Edit task' : isAuto ? 'New vehicle task' : 'New upkeep task', prefix, fields,
+    title: task ? (task.once ? 'Edit to-do' : 'Edit task') : isAuto ? 'New vehicle task' : 'New task', prefix, fields,
     values: { ...v, vehicleId: v.vehicleId || state.vehicles[0]?.id, ...freqFields(v.freqDays) },
     onSave: o => {
       const t = task || { id: uid(), area: v.area, lastDone: '' };
-      Object.assign(t, { title: o.title, assignee: o.assignee, freqDays: toDays(o.freqN, o.freqUnit), nextDue: o.nextDue || today(), effort: Number(o.effort), notes: o.notes });
+      const once = o.freqUnit === 'once';
+      Object.assign(t, { title: o.title, assignee: o.assignee, once, freqDays: once ? 0 : toDays(o.freqN, o.freqUnit), nextDue: o.nextDue || (once ? '' : today()), effort: Number(o.effort), notes: o.notes });
       if (isAuto) { t.vehicleId = o.vehicleId; t.zone = 'Vehicles'; } else t.zone = o.zone || 'Whole house';
       if (!task) state.tasks.push(t);
       after?.(); if (!task) toast('Task added');
@@ -442,11 +570,12 @@ function completeTask(id) {
   const t = state.tasks.find(x => x.id === id); if (!t) return;
   const who = state.activeMember;
   state.log.unshift({ id: uid(), taskId: t.id, title: t.title, memberId: who, date: today(), points: t.effort || 1 });
+  if (t.once) { state.tasks = state.tasks.filter(x => x !== t); toast(`Done · +${t.effort || 1} for ${memberName(who) || 'the house'}`); recordHealth(); commit(); return; }
   t.lastDone = today(); t.nextDue = addDays(today(), t.freqDays);
   toast(`Done — next ${fmtDate(t.nextDue, { month: 'short', day: 'numeric' })} · +${t.effort || 1} for ${memberName(who) || 'the house'}`);
   recordHealth(); commit();
 }
-function snoozeTask(id, days = 3) { const t = state.tasks.find(x => x.id === id); t.nextDue = addDays(t.nextDue < today() ? today() : t.nextDue, days); toast(`Moved to ${fmtDate(t.nextDue)}`); commit(); }
+function snoozeTask(id, days = 3) { const t = state.tasks.find(x => x.id === id); t.nextDue = addDays(!t.nextDue || t.nextDue < today() ? today() : t.nextDue, days); toast(`Moved to ${fmtDate(t.nextDue)}`); commit(); }
 
 function editBill(bill, preset = {}, prefix = '', after) {
   const v = bill || { category: 'Insurance', freq: 'monthly', nextDue: today(), autopay: false, ...preset };
@@ -591,20 +720,21 @@ const AISLES = [
 const AISLE_ORDER = ['Produce', 'Bakery', 'Meat & seafood', 'Dairy & eggs', 'Pantry', 'Frozen', 'Household', 'Other'];
 const guessAisle = item => (AISLES.find(([, re]) => re.test(item.toLowerCase())) || ['Other'])[0];
 function addGrocery(item, recipeId = '') {
-  const clean = item.trim(); if (!clean) return;
+  const clean = item.trim().replace(/^./, c => c.toUpperCase()); if (!clean) return;
   if (state.grocery.some(g => !g.done && g.item.toLowerCase() === clean.toLowerCase())) return;
-  state.grocery.push({ id: uid(), item: clean, aisle: guessAisle(clean), done: false, recipeId, addedBy: state.activeMember });
+  const g = { id: uid(), item: clean, aisle: guessAisle(clean), done: false, recipeId, addedBy: state.activeMember };
+  state.grocery.push(g); return g;
 }
 
 /* ================= Views ================= */
 const ROUTES = [
-  ['home', 'Home', 'home'], ['upkeep', 'Upkeep', 'upkeep'], ['auto', 'Vehicles', 'auto'], ['money', 'Bills', 'money'],
-  ['meals', 'Meals', 'meals'], ['calendar', 'Calendar', 'calendar'], ['shopping', 'To buy', 'shopping'],
+  ['home', 'Home', 'home'], ['upkeep', 'House', 'upkeep'], ['calendar', 'Calendar', 'calendar'], ['groceries', 'Groceries', 'cart'],
+  ['meals', 'Meals', 'meals'], ['money', 'Bills', 'money'], ['auto', 'Vehicles', 'auto'], ['shopping', 'To buy', 'shopping'],
   ['planning', 'Family plan', 'planning'], ['family', 'Family', 'family'],
 ];
-const TABS = ['home', 'upkeep', 'meals', 'calendar'];
-const MORE = ['auto', 'money', 'shopping', 'planning', 'family'];
-const ui = { zone: 'All', recipeTag: 'All', recipeQ: '', mealWeek: null, calMonth: null, openStep: null, shopFor: 'All' };
+const TABS = ['home', 'upkeep', null, 'calendar'];
+const MORE = ['groceries', 'meals', 'money', 'auto', 'shopping', 'planning', 'family'];
+const ui = { receipts: [], zone: 'All', recipeTag: 'All', recipeQ: '', mealWeek: null, calMonth: null, openStep: null, shopFor: 'All' };
 
 function head(eyebrow, title, actions = '') {
   return `<div class="page-head"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1></div><span class="grow"></span>${actions}</div>`;
@@ -613,19 +743,19 @@ function taskRow(t, opts = {}) {
   const car = t.vehicleId ? state.vehicles.find(c => c.id === t.vehicleId) : null;
   const tone = dueTone(t.nextDue);
   return `<div class="row">
-    <button class="check" data-act="doneTask" data-id="${t.id}" title="Mark done">${icon('check')}</button>
+    <button class="check ${car ? 'auto' : ''}" data-act="doneTask" data-id="${t.id}" title="Mark done">${icon('check')}</button>
     <div class="body"><div class="title">${esc(t.title)}</div>
-      <div class="meta">${car ? esc(car.name) : esc(t.zone)} · ${freqLabel(t.freqDays)} ${t.lastDone ? `· last ${fmtDate(t.lastDone, { month: 'short', day: 'numeric' })}` : ''} <span class="effort">${'●'.repeat(t.effort || 1)}</span></div></div>
+      <div class="meta">${car ? esc(car.name) : esc(t.zone)} · ${freqLabel(t.freqDays)} ${t.lastDone ? `· last ${fmtDate(t.lastDone, { month: 'short', day: 'numeric' })}` : ''}</div></div>
     ${t.assignee ? memberDot(t.assignee) : ''}
-    <span class="pill ${tone}">${rel(t.nextDue)}</span>
+    ${t.nextDue ? `<span class="pill ${tone}">${rel(t.nextDue)}</span>` : ''}
     ${opts.noSnooze ? '' : `<button class="iconbtn" data-act="snooze" data-id="${t.id}" title="Push 3 days">${icon('snooze')}</button>`}
     <button class="iconbtn" data-act="editTask" data-id="${t.id}" title="Edit">${icon('edit')}</button>
   </div>`;
 }
-function ring(pct, color = 'var(--teal)', size = 92) {
+function ring(pct, color = 'var(--blue)', size = 92) {
   const r = size / 2 - 7, c = 2 * Math.PI * r;
   return `<div class="ring" style="width:${size}px;height:${size}px"><svg width="${size}" height="${size}"><circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--surface-2)" stroke-width="8"/>
-    <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="${color}" stroke-width="8" stroke-linecap="round" stroke-dasharray="${c * pct / 100} ${c}"/></svg><div class="val">${pct}</div></div>`;
+    <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="${color}" stroke-width="8" stroke-linecap="round" stroke-dasharray="${c * pct / 100} ${c}"/></svg><div class="val" style="font-size:${Math.round(size * .24)}px">${pct}</div></div>`;
 }
 function eventsOn(d) {
   return state.events.filter(e => {
@@ -640,69 +770,85 @@ function eventsOn(d) {
   }).sort((x, y) => (x.time || '99').localeCompare(y.time || '99'));
 }
 const activeBills = () => state.bills.filter(b => !b.done);
+function groceryCard() {
+  const groc = state.grocery;
+  const byAisle = AISLE_ORDER.map(a => [a, groc.filter(g => g.aisle === a && !g.done)]).filter(([, l]) => l.length);
+  const doneItems = groc.filter(g => g.done);
+  return `<div class="card" style="align-self:start"><div class="card-head"><h2>Grocery list</h2><span class="grow"></span><span class="pill">${groc.length - doneItems.length}</span></div>
+          <form data-form="grocery" style="display:flex;gap:6px;margin-bottom:12px"><input name="item" class="search" style="min-width:0;flex:1" placeholder="Add item…"><button class="btn">${icon('plus')}</button></form>
+          ${byAisle.map(([a, l]) => `<div class="aisle"><div class="section-title">${a}</div>${l.map(g => `<div class="row"><button class="check grocery" data-act="toggleGroc" data-id="${g.id}">${icon('check')}</button><div class="body"><div>${esc(g.item)}</div>${g.recipeId ? `<div class="meta">${esc(state.recipes.find(r => r.id === g.recipeId)?.name || '')}</div>` : ''}</div><button class="iconbtn" data-act="delGroc" data-id="${g.id}">${icon('trash')}</button></div>`).join('')}</div>`).join('') || '<div class="muted small">List is empty.</div>'}
+          ${doneItems.length ? `<div class="section-title" style="display:flex">In the cart · ${doneItems.length}<span class="grow"></span><button class="btn sm ghost" data-act="clearGroc">Clear</button></div>${doneItems.map(g => `<div class="row done"><button class="check grocery on" data-act="toggleGroc" data-id="${g.id}">${icon('check')}</button><div class="body"><div class="title" style="font-weight:400">${esc(g.item)}</div></div></div>`).join('')}` : ''}
+          <div style="margin-top:12px"><button class="btn sm ghost" data-act="copyGroc">Copy list as text</button></div>
+        </div>`;
+}
 
 const views = {
   home() {
     const t = today();
-    const hh = houseHealth();
-    const due = state.tasks.filter(x => x.nextDue <= t).sort((a, b) => a.nextDue.localeCompare(b.nextDue));
-    const soon = state.tasks.filter(x => x.nextDue > t && x.nextDue <= addDays(t, 6)).sort((a, b) => a.nextDue.localeCompare(b.nextDue));
-    const bills = activeBills().filter(b => b.nextDue <= addDays(t, 14)).sort((a, b) => a.nextDue.localeCompare(b.nextDue));
-    const upcoming = [];
-    for (let i = 0; i < 7; i++) { const d = addDays(t, i); eventsOn(d).forEach(e => upcoming.push({ d, e })); }
-    const meal = state.mealPlan[t]; const mealRecipe = meal?.recipeId && state.recipes.find(r => r.id === meal.recipeId);
-    const pts = weekPoints(); const total = Object.values(pts).reduce((a, b) => a + b, 0); const goal = state.settings.weeklyGoal || 30;
-    const ep = estateProgress(); const st = streak();
     const hour = new Date().getHours(); const greet = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+    const due = state.tasks.filter(isDue).sort(byDue);
+    const evToday = eventsOn(t);
+    const billsSoon = activeBills().filter(b => b.nextDue <= addDays(t, 3)).sort((a, b) => a.nextDue.localeCompare(b.nextDue));
+    const todos = state.tasks.filter(x => x.once && !x.nextDue);
+    const meal = state.mealPlan[t]; const mealRecipe = meal?.recipeId && state.recipes.find(r => r.id === meal.recipeId);
+    const weekEnd = addDays(t, 6);
+    let evWeek = 0; for (let i = 0; i < 7; i++) evWeek += eventsOn(addDays(t, i)).length;
+    const houseWeek = state.tasks.filter(x => x.nextDue && x.nextDue <= weekEnd && x.area === 'home').length;
+    const bills14 = activeBills().filter(b => b.nextDue <= addDays(t, 14));
+    const billTotal = bills14.reduce((a, b) => a + (Number(b.amount) || 0), 0);
     const groceryLeft = state.grocery.filter(g => !g.done).length;
     const needed = state.purchases.filter(p => p.status === 'needed').length;
-    const earned = MILESTONES.filter(m => state.milestones[m.id]);
-    return head(fmtDate(t, { weekday: 'long', month: 'long', day: 'numeric' }), `${greet}${state.settings.familyName ? ', ' + esc(state.settings.familyName) : ''}.`) + `
-    <div class="hero">
-      <div class="card stat">${ring(hh, hh >= 85 ? 'var(--teal)' : hh >= 65 ? 'var(--mustard)' : 'var(--rust)')}
-        <div><div class="lbl">House health</div><div class="muted small" style="margin-top:4px">${hh >= 85 ? 'The house is in good order.' : hh >= 65 ? 'A few things slipping.' : 'Time for a reset day.'}</div>
-        <div class="small" style="margin-top:6px">${st ? `<b>${st}</b> day${st > 1 ? 's' : ''} steady` : '<span class="muted">Reach 85 to start a streak</span>'}</div></div></div>
-      <div class="card"><div class="lbl stat"><span class="lbl">Household rhythm · 7 days</span></div>
-        <div style="display:flex;align-items:baseline;gap:6px;margin:8px 0"><span class="num" style="font-family:var(--serif);font-size:30px">${total}</span><span class="muted">/ ${goal} pts</span></div>
-        <div class="bar"><i style="width:${Math.min(100, total / goal * 100)}%;background:${total >= goal ? 'var(--olive)' : 'var(--teal)'}"></i></div>
-        <div class="contrib" style="margin-top:12px">${adults().map(m => `<div class="who"><span>${esc(m.name)}</span><div class="bar"><i style="width:${total ? (pts[m.id] || 0) / Math.max(total, 1) * 100 : 0}%;background:${m.color}"></i></div><span class="muted small">${pts[m.id] || 0}</span></div>`).join('')}</div></div>
-      <div class="card"><span class="lbl stat"><span class="lbl">Tonight's dinner</span></span>
-        <div class="dinner-tonight" style="margin:10px 0 6px">${meal ? esc(mealRecipe ? mealRecipe.name : meal.text) : '<span class="muted">Not planned yet</span>'}</div>
-        <div class="small muted">${meal?.cook ? `${esc(memberName(meal.cook))} is cooking · ` : ''}${groceryLeft} on the grocery list</div>
-        <div style="margin-top:12px;display:flex;gap:6px"><button class="btn sm" data-act="planMeal" data-date="${t}">${meal ? 'Change' : 'Plan it'}</button><a class="btn sm ghost" href="#/meals">Week</a></div></div>
-      <div class="card"><span class="lbl stat"><span class="lbl">Family plan</span></span>
-        <div style="display:flex;align-items:baseline;gap:6px;margin:8px 0"><span style="font-family:var(--serif);font-size:30px">${ep.done}</span><span class="muted">of ${ep.total} steps</span></div>
-        <div class="bar"><i style="width:${ep.done / ep.total * 100}%;background:var(--mustard)"></i></div>
-        <div class="milestones" style="margin-top:14px">${earned.length ? earned.slice(-5).map(m => `<span class="medal earned" title="${esc(m.name)} — ${esc(m.desc)}">${icon('medal')}</span>`).join('') : '<span class="small muted">Milestones appear here as you go.</span>'}</div></div>
-    </div>
-    <div class="grid g3">
-      <div class="card span2">
-        <div class="card-head"><h2>Needs doing</h2><span class="grow"></span><span class="muted small">Logging as ${memberDot(state.activeMember)} ${esc(memberName(state.activeMember))}</span></div>
-        ${due.length ? `<div class="section-title">Today & overdue</div>${due.map(x => taskRow(x)).join('')}` : `<div class="empty"><h3>Nothing due today.</h3>Enjoy it — or get ahead on something below.</div>`}
-        ${soon.length ? `<div class="section-title">This week</div>${soon.map(x => taskRow(x)).join('')}` : ''}
+    const coming = [];
+    for (let i = 1; i < 8; i++) { const d = addDays(t, i); eventsOn(d).forEach(e => coming.push({ d, kind: 'event', e })); activeBills().filter(b => b.nextDue === d && d > addDays(t, 3)).forEach(b => coming.push({ d, kind: 'bill', b })); }
+    const eventRow = e => `<div class="row"><span class="shape ci b" style="margin:0 4px"></span><div class="body" data-act="editEvent" data-id="${e.id}" style="cursor:pointer"><div class="title">${esc(e.title)}</div><div class="meta">${e.time ? fmtTime(e.time) : 'All day'}${e.location ? ' · ' + esc(e.location) : ''}${(e.members || []).length ? ' · ' + e.members.map(memberName).join(', ') : ''}</div></div></div>`;
+    const billRow = b => `<div class="row"><button class="shape tr y" data-act="payBill" data-id="${b.id}" title="Mark paid"></button><div class="body" data-act="editBill" data-id="${b.id}" style="cursor:pointer"><div class="title">${esc(b.name)}${b.amount ? ' · ' + money(b.amount) : ''}</div><div class="meta">${rel(b.nextDue)}${b.autopay ? ' · autopay' : ' · tap ▲ when paid'}</div></div></div>`;
+    const todayCount = evToday.length + due.length + billsSoon.length;
+    const tile = (href, cls, n, label, sub = '', txt = false) => `<a class="tile ${cls}" href="#/${href}"><div class="n ${txt ? 'txt' : ''}">${n}</div><div><div class="l">${label}</div>${sub ? `<div class="s">${sub}</div>` : ''}</div></a>`;
+    return `<div class="hello">
+        <svg class="deco" viewBox="0 0 120 120" aria-hidden="true"><circle cx="120" cy="0" r="78" fill="var(--red)"/><rect x="18" y="66" width="34" height="34" rx="4" fill="var(--blue)"/><circle cx="92" cy="96" r="12" fill="var(--yellow)"/></svg>
+        <div class="eyebrow">${fmtDate(t, { weekday: 'long', month: 'long', day: 'numeric' })}</div>
+        <h1>${greet}${state.settings.familyName ? ',<br>' + esc(state.settings.familyName) : ''}.</h1></div>
+      <div class="tiles">
+        ${tile('groceries', 'y', groceryLeft, 'Groceries')}
+        ${tile('upkeep', 'r', houseWeek, 'House this week', houseHealth() < 100 ? `Health ${houseHealth()}` : '')}
+        ${tile('calendar', 'b', evWeek, 'Events this week')}
+        ${tile('money', 'k', bills14.length, 'Bills · 14 days', billTotal ? money(billTotal) : '')}
+        ${tile('meals', 'w', meal ? esc(mealRecipe ? mealRecipe.name : meal.text) : 'Plan it →', 'Tonight’s dinner', '', true)}
+        ${tile('shopping', 'w', needed, 'To buy')}
       </div>
-      <div class="grid" style="align-content:start">
-        <div class="card"><div class="card-head"><h2>Next 7 days</h2><span class="grow"></span><button class="iconbtn" data-act="newEvent" title="Add event">${icon('plus')}</button></div>
-          ${upcoming.length ? upcoming.slice(0, 8).map(({ d, e }) => `<div class="row" data-act="editEvent" data-id="${e.id}" style="cursor:pointer"><div class="body"><div class="title">${esc(e.title)}</div><div class="meta">${rel(d)}${e.time ? ' · ' + fmtTime(e.time) : ''}${e.location ? ' · ' + esc(e.location) : ''}</div></div>${(e.members || []).map(memberDot).join('')}</div>`).join('') : '<div class="muted small">A clear week.</div>'}</div>
-        <div class="card"><div class="card-head"><h2>Bills due soon</h2><span class="grow"></span><a class="small" href="#/money">All</a></div>
-          ${bills.length ? bills.map(b => `<div class="row"><div class="body"><div class="title">${esc(b.name)}</div><div class="meta">${money(b.amount)}${b.autopay ? ' · autopay' : ''}</div></div><span class="pill ${dueTone(b.nextDue)}">${rel(b.nextDue)}</span>${b.autopay ? '' : `<button class="btn sm" data-act="payBill" data-id="${b.id}">Paid</button>`}</div>`).join('') : `<div class="muted small">Nothing in the next two weeks.${state.bills.length ? '' : ' <a href="#/money">Add your bills</a> so nothing sneaks up.'}</div>`}</div>
-        ${state.inbox.length ? `<div class="card"><div class="card-head"><h2>Inbox</h2><span class="pill mustard">${state.inbox.length}</span></div>
-          ${state.inbox.map(i => `<div class="row"><div class="body"><div class="title" style="font-weight:400">${esc(i.text)}</div><div class="meta">${fmtDate(i.date)}</div></div><button class="btn sm" data-act="fileInbox" data-id="${i.id}">File</button><button class="iconbtn" data-act="delInbox" data-id="${i.id}">${icon('trash')}</button></div>`).join('')}</div>` : ''}
-        <div class="card"><div class="card-head"><h2>Lists</h2></div>
-          <div class="row"><div class="body"><a href="#/meals" class="title">Grocery list</a></div><span class="pill">${groceryLeft}</span></div>
-          <div class="row"><div class="body"><a href="#/shopping" class="title">Things to buy</a></div><span class="pill">${needed}</span></div></div>
-      </div>
-    </div>`;
+      <div class="grid g3">
+        <div class="card span2">
+          <div class="card-head"><h2>TODAY${todayCount ? ` — ${todayCount}` : ''}</h2></div>
+          <div class="rule">${evToday.map(eventRow).join('')}${due.map(x => taskRow(x)).join('')}${billsSoon.map(billRow).join('')}</div>
+          ${todayCount ? '' : '<div class="empty"><h3>Nothing on the docket.</h3>Tell Higgins what’s on your mind — it’ll file it.</div>'}
+          ${todos.length ? `<div class="section-title">To-dos · ${todos.length}</div><div class="rule">${todos.map(x => taskRow(x, { noSnooze: true })).join('')}</div>` : ''}
+        </div>
+        <div class="grid" style="align-content:start">
+          <div class="card"><div class="card-head"><h2>COMING UP</h2></div>
+            ${coming.length ? coming.slice(0, 8).map(c => c.kind === 'event'
+              ? `<div class="row" data-act="editEvent" data-id="${c.e.id}" style="cursor:pointer"><span class="shape ci b"></span><div class="body"><div class="title">${esc(c.e.title)}</div><div class="meta">${fmtDate(c.d)}${c.e.time ? ' · ' + fmtTime(c.e.time) : ''}</div></div></div>`
+              : `<div class="row" data-act="editBill" data-id="${c.b.id}" style="cursor:pointer"><span class="shape tr y"></span><div class="body"><div class="title">${esc(c.b.name)}</div><div class="meta">${fmtDate(c.d)}${c.b.amount ? ' · ' + money(c.b.amount) : ''}</div></div></div>`).join('')
+              : '<div class="muted small">A clear week ahead.</div>'}</div>
+          ${state.inbox.length ? `<div class="card"><div class="card-head"><h2>INBOX</h2><span class="pill mustard">${state.inbox.length}</span></div>
+            ${state.inbox.map(i => `<div class="row"><div class="body"><div class="title" style="font-weight:400">${esc(i.text)}</div><div class="meta">${fmtDate(i.date)}</div></div><button class="btn sm" data-act="fileInbox" data-id="${i.id}">File</button><button class="iconbtn" data-act="delInbox" data-id="${i.id}">${icon('trash')}</button></div>`).join('')}</div>` : ''}
+        </div>
+      </div>`;
   },
 
   upkeep() {
     const home = state.tasks.filter(t => t.area === 'home');
     const zones = [...new Set([...ZONES, ...home.map(t => t.zone)])].filter(z => home.some(t => t.zone === z));
-    const list = home.filter(t => ui.zone === 'All' || t.zone === ui.zone).sort((a, b) => a.nextDue.localeCompare(b.nextDue));
+    const list = home.filter(t => ui.zone === 'All' || t.zone === ui.zone).sort(byDue);
     const t = today();
-    const groups = [['Overdue', list.filter(x => x.nextDue < t)], ['Due today', list.filter(x => x.nextDue === t)], ['Next 14 days', list.filter(x => x.nextDue > t && x.nextDue <= addDays(t, 14))], ['Later', list.filter(x => x.nextDue > addDays(t, 14))]];
+    const hh = houseHealth(), st = streak(), pts = weekPoints(), total = Object.values(pts).reduce((a, b) => a + b, 0), goal = state.settings.weeklyGoal || 30;
+    const groups = [['To-dos', list.filter(x => !x.nextDue)], ['Overdue', list.filter(isOverdue)], ['Due today', list.filter(x => x.nextDue === t)], ['Next 14 days', list.filter(x => x.nextDue > t && x.nextDue <= addDays(t, 14))], ['Later', list.filter(x => x.nextDue > addDays(t, 14))]];
     const recent = state.log.filter(l => { const tk = state.tasks.find(x => x.id === l.taskId); return !tk || tk.area === 'home'; }).slice(0, 8);
-    return head('Home upkeep', 'The house, looked after', `<button class="btn primary" data-act="newTask">${icon('plus')}New task</button>`) + `
+    return head('Home upkeep', 'The house', `<button class="btn primary" data-act="newTask">${icon('plus')}New task</button>`) + `
+      <div class="card strip">${ring(hh, hh >= 85 ? 'var(--blue)' : hh >= 65 ? 'var(--yellow)' : 'var(--red)', 76)}
+        <div><div class="stat"><span class="lbl">House health</span></div><div style="margin-top:4px">${hh >= 85 ? 'In good order.' : hh >= 65 ? 'A few things slipping.' : 'Time for a reset day.'}</div><div class="small muted">${st ? `${st} day${st > 1 ? 's' : ''} steady at 85+` : 'Reach 85 to start a streak'}</div></div>
+        <span class="grow"></span>
+        <div class="contrib"><div class="small"><b>${total}</b> <span class="muted">/ ${goal} pts this week</span></div><div class="bar"><i style="width:${Math.min(100, total / goal * 100)}%;background:${total >= goal ? 'var(--green)' : 'var(--blue)'}"></i></div>
+          ${adults().map(m => `<div class="who"><span>${esc(m.name)}</span><div class="bar"><i style="width:${total ? (pts[m.id] || 0) / total * 100 : 0}%;background:${m.color}"></i></div><span class="muted small">${pts[m.id] || 0}</span></div>`).join('')}</div></div>
       <div class="zones">
         <button class="zone ${ui.zone === 'All' ? 'on' : ''}" data-act="zone" data-zone="All"><div class="zn">Whole home <span>${houseHealth()}</span></div><div class="bar"><i style="width:${houseHealth()}%"></i></div></button>
         ${zones.map(z => { const h = healthOf(home.filter(x => x.zone === z)); return `<button class="zone ${ui.zone === z ? 'on' : ''}" data-act="zone" data-zone="${esc(z)}"><div class="zn">${esc(z)} <span>${h}</span></div><div class="bar"><i style="width:${h}%;background:${h >= 85 ? 'var(--teal)' : h >= 65 ? 'var(--mustard)' : 'var(--rust)'}"></i></div></button>`; }).join('')}
@@ -758,9 +904,6 @@ const views = {
     const q = ui.recipeQ.toLowerCase();
     const recipes = state.recipes.filter(r => (ui.recipeTag === 'All' || (ui.recipeTag === 'Favorites' ? r.favorite : r.tags.includes(ui.recipeTag))) && (!q || (r.name + r.ingredients.join(' ') + r.tags.join(' ')).toLowerCase().includes(q)))
       .sort((a, b) => (b.favorite - a.favorite) || a.name.localeCompare(b.name));
-    const groc = state.grocery;
-    const byAisle = AISLE_ORDER.map(a => [a, groc.filter(g => g.aisle === a && !g.done)]).filter(([, l]) => l.length);
-    const doneItems = groc.filter(g => g.done);
     return head('Meals', 'What’s for dinner', `<button class="btn" data-act="newRecipe">${icon('plus')}Recipe</button>`) + `
       <div class="card" style="margin-bottom:20px"><div class="card-head"><button class="iconbtn" data-act="mealWeek" data-d="-7">${icon('left')}</button>
         <h2>${fmtDate(ws, { month: 'short', day: 'numeric' })} – ${fmtDate(addDays(ws, 6), { month: 'short', day: 'numeric' })}</h2><button class="iconbtn" data-act="mealWeek" data-d="7">${icon('right')}</button><span class="grow"></span>
@@ -778,13 +921,13 @@ const views = {
             <div style="display:flex;gap:4px;flex-wrap:wrap">${r.tags.map(t => `<span class="pill">${esc(t)}</span>`).join('')}</div>
             <div class="small muted" style="margin-top:auto">${r.timesMade ? `Made ${r.timesMade}× · last ${fmtDate(r.lastMade, { month: 'short', day: 'numeric' })}` : 'Not made yet'}</div></div>`).join('') || '<div class="muted">No recipes match.</div>'}</div>
         </div>
-        <div class="card" style="align-self:start"><div class="card-head"><h2>Grocery list</h2><span class="grow"></span><span class="pill">${groc.length - doneItems.length}</span></div>
-          <form data-form="grocery" style="display:flex;gap:6px;margin-bottom:12px"><input name="item" class="search" style="min-width:0;flex:1" placeholder="Add item…"><button class="btn">${icon('plus')}</button></form>
-          ${byAisle.map(([a, l]) => `<div class="aisle"><div class="section-title">${a}</div>${l.map(g => `<div class="row"><button class="check" data-act="toggleGroc" data-id="${g.id}">${icon('check')}</button><div class="body"><div>${esc(g.item)}</div>${g.recipeId ? `<div class="meta">${esc(state.recipes.find(r => r.id === g.recipeId)?.name || '')}</div>` : ''}</div><button class="iconbtn" data-act="delGroc" data-id="${g.id}">${icon('trash')}</button></div>`).join('')}</div>`).join('') || '<div class="muted small">List is empty.</div>'}
-          ${doneItems.length ? `<div class="section-title" style="display:flex">In the cart · ${doneItems.length}<span class="grow"></span><button class="btn sm ghost" data-act="clearGroc">Clear</button></div>${doneItems.map(g => `<div class="row done"><button class="check on" data-act="toggleGroc" data-id="${g.id}">${icon('check')}</button><div class="body"><div class="title" style="font-weight:400">${esc(g.item)}</div></div></div>`).join('')}` : ''}
-          <div style="margin-top:12px"><button class="btn sm ghost" data-act="copyGroc">Copy list as text</button></div>
-        </div>
+        ${groceryCard()}
       </div>`;
+  },
+
+  groceries() {
+    return head('Groceries', 'The list', `<a class="btn" href="#/meals">${icon('meals')}Meal plan</a>`) + `<div style="max-width:640px">${groceryCard()}</div>
+      <div class="notice" style="margin-top:16px;max-width:640px">Tip: just say “we’re out of milk, eggs and coffee” in the bar up top — items land here sorted by aisle.</div>`;
   },
 
   calendar() {
@@ -872,7 +1015,7 @@ const views = {
           ${state.members.map(m => `<div class="row" data-act="editMember" data-id="${m.id}" style="cursor:pointer"><span class="dot" style="background:${m.color};width:14px;height:14px"></span><div class="body"><div class="title">${esc(m.name)}</div><div class="meta">${m.role === 'Kid' ? 'Kid · tracked for calendar, sizes & purchases' : `${esc(m.role || 'Adult')} · ${state.log.filter(l => l.memberId === m.id).length} tasks logged all time`}</div></div></div>`).join('')}
           <div class="section-title">Household</div>
           <form data-form="settings" class="fields">${fieldHTML({ key: 'familyName', label: 'Family name (e.g. the Parkers)', half: true }, s.familyName)}${fieldHTML({ key: 'weeklyGoal', label: 'Weekly rhythm goal (pts)', type: 'number', half: true }, s.weeklyGoal)}
-            ${fieldHTML({ key: 'theme', label: 'Appearance', type: 'select', half: true, options: [['auto', 'Match system'], ['light', 'Light'], ['dark', 'Dark']] }, s.theme)}
+            ${fieldHTML({ key: 'theme', label: 'Appearance', type: 'select', half: true, options: [['light', 'Light'], ['dark', 'Dark'], ['auto', 'Match phone setting']] }, s.theme)}
             <div class="field half" style="justify-content:end"><button class="btn primary">Save</button></div></form></div>
         <div class="card"><div class="card-head"><h2>Milestones</h2><span class="grow"></span><span class="muted small">${Object.keys(state.milestones).length} of ${MILESTONES.length}</span></div>
           ${MILESTONES.map(m => `<div class="milestone-row"><span class="medal ${state.milestones[m.id] ? 'earned' : ''}">${icon('medal')}</span><div><div class="title" style="font-weight:500">${esc(m.name)}</div><div class="small muted">${esc(m.desc)}${state.milestones[m.id] ? ' · ' + fmtDate(state.milestones[m.id], { month: 'short', day: 'numeric', year: 'numeric' }) : ''}</div></div></div>`).join('')}</div>
@@ -887,9 +1030,15 @@ const views = {
 const find = (arr, id) => arr.find(x => x.id === id);
 const actions = {
   doneTask: d => completeTask(d.id),
+  voice: () => startVoice(),
+  undoReceipt: d => { const r = find(ui.receipts, d.id); r.undo(); ui.receipts = ui.receipts.filter(x => x !== r); toast('Undone'); commit(); },
+  moveReceipt: d => { const r = find(ui.receipts, d.id); r.moving = !r.moving; renderReceipts(); },
+  moveTo: d => { const r = find(ui.receipts, d.id); r.undo(); Object.assign(r, fileCapture(r.p, d.cat), { cat: d.cat, moving: false }); toast(`Moved to ${CAT_SHORT[d.cat]}`); commit(); },
+  editReceipt: d => find(ui.receipts, d.id).edit(),
+  dismissReceipt: d => { ui.receipts = ui.receipts.filter(x => x.id !== d.id); renderReceipts(); },
   snooze: d => snoozeTask(d.id),
   editTask: d => editTask(find(state.tasks, d.id)),
-  newTask: () => editTask(null, { zone: ui.zone !== 'All' ? ui.zone : 'Kitchen' }),
+  newTask: () => editTask(null, { zone: ui.zone !== 'All' ? ui.zone : 'General' }),
   newAutoTask: () => editTask(null, { area: 'auto', freqDays: 180 }),
   zone: d => { ui.zone = d.zone; render(); },
   newVehicle: () => editVehicle(null),
@@ -937,7 +1086,11 @@ const actions = {
   newPerson: () => editSimple('people', null), editPerson: d => editSimple('people', find(state.estate.people, d.id)),
   newLocation: () => editSimple('locations', null), editLocation: d => editSimple('locations', find(state.estate.locations, d.id)),
   delEstateNote: d => { state.estate.notes = state.estate.notes.filter(n => n.id !== d.id); commit(); },
-  fileInbox: d => { const i = find(state.inbox, d.id); const p = parseCapture(i.text); p.inboxId = i.id; openCapture(p, p.cat === 'note' ? 'task' : p.cat); },
+  fileInbox: d => {
+    const i = find(state.inbox, d.id); const p = parseCapture(i.text);
+    ui.receipts.unshift({ id: uid(), p, cat: 'note', summary: i.text, undo: () => { state.inbox = state.inbox.filter(x => x !== i); }, edit: () => {}, moving: true });
+    renderReceipts(); window.scrollTo(0, 0);
+  },
   delInbox: d => { state.inbox = state.inbox.filter(i => i.id !== d.id); commit(); },
   newMember: () => editMember(null), editMember: d => editMember(find(state.members, d.id)),
   exportData: () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' })); a.download = `higgins-backup-${today()}.json`; a.click(); },
@@ -1001,17 +1154,18 @@ Object.assign(actions, {
 
 /* ================= Render & events ================= */
 function route() { const r = location.hash.replace(/^#\/?/, '') || 'home'; return views[r] ? r : 'home'; }
-function applyTheme() { const t = state.settings.theme; if (t === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.dataset.theme = t; }
+function applyTheme() { document.documentElement.dataset.theme = state.settings.theme || 'light'; }
 function render() {
   const r = route();
   applyTheme();
   $('#familyName').textContent = state.settings.familyName || 'Family HQ';
-  const badges = { upkeep: state.tasks.filter(t => t.area === 'home' && t.nextDue < today()).length, auto: state.tasks.filter(t => t.area === 'auto' && t.nextDue < today()).length, money: activeBills().filter(b => b.nextDue < today()).length };
+  const badges = { upkeep: state.tasks.filter(t => t.area === 'home' && isOverdue(t)).length, auto: state.tasks.filter(t => t.area === 'auto' && isOverdue(t)).length, money: activeBills().filter(b => b.nextDue < today()).length };
   $('#nav').innerHTML = ROUTES.map(([id, label, ic]) => `<a href="#/${id}" class="${r === id ? 'active' : ''}">${icon(ic)}<span class="lbl">${label}</span>${badges[id] ? `<span class="badge">${badges[id]}</span>` : ''}</a>`).join('');
-  $('#tabbar').innerHTML = TABS.map(id => { const [, label, ic] = ROUTES.find(x => x[0] === id); return `<a href="#/${id}" class="${r === id ? 'active' : ''}">${icon(ic)}<span>${label}</span>${badges[id] ? '<i></i>' : ''}</a>`; }).join('')
+  $('#tabbar').innerHTML = TABS.map(id => { if (!id) return `<button class="fab" data-act="voice" title="Tell Higgins">${icon('mic')}</button>`; const [, label, ic] = ROUTES.find(x => x[0] === id); return `<a href="#/${id}" class="${r === id ? 'active' : ''}">${icon(ic)}<span>${label}</span>${badges[id] ? '<i></i>' : ''}</a>`; }).join('')
     + `<a href="#" data-act="more" class="${TABS.includes(r) ? '' : 'active'}">${icon('more')}<span>More</span>${MORE.some(id => badges[id]) ? '<i></i>' : ''}</a>`;
   $('#who').innerHTML = adults().map(m => `<option value="${m.id}" ${m.id === state.activeMember ? 'selected' : ''}>${esc(m.name)}</option>`).join('');
   $('#view').innerHTML = views[r]();
+  renderReceipts();
   document.title = `Higgins · ${ROUTES.find(x => x[0] === r)[1]}`;
 }
 
@@ -1042,7 +1196,6 @@ document.addEventListener('change', e => {
 window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
 modal().addEventListener('close', () => { modal().innerHTML = ''; });
 
-if (matchMedia('(max-width: 860px)').matches) $('#captureInput').placeholder = 'Add anything — “dentist Tue 3pm”';
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 navigator.storage?.persist?.().catch(() => {});
 

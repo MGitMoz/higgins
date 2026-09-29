@@ -3,8 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#F2ECE1" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#181614" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#F6F3EC">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -15,7 +14,7 @@
   <title>Higgins</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&family=Fraunces:opsz,wght@9..144,400;9..144,500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Jost:wght@400;500;600&family=Syne:wght@700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -23,9 +22,9 @@
     <aside class="sidebar">
       <div class="brand">
         <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
-          <circle cx="16" cy="16" r="15" fill="var(--teal)"/>
+          <circle cx="16" cy="16" r="15" fill="var(--blue)"/>
           <path d="M8 17 16 9l8 8v7H8z" fill="var(--bg)"/>
-          <circle cx="16" cy="19" r="3" fill="var(--mustard)"/>
+          <circle cx="16" cy="19" r="3" fill="var(--red)"/>
         </svg>
         <div><div class="brand-name">Higgins</div><div class="brand-sub" id="familyName"></div></div>
       </div>
@@ -38,11 +37,12 @@
     <main class="main">
       <div class="topbar">
         <form class="capture" id="captureForm" autocomplete="off">
-          <input id="captureInput" placeholder="Capture anything — “we’re out of milk and eggs”, “dentist Tuesday at 3pm”, “pay car insurance $140 on the 15th”">
+          <input id="captureInput" enterkeyhint="done" placeholder="Tell Higgins anything — “out of milk and eggs”, “dentist Tuesday 3pm”, “car insurance $140 on the 15th”">
           <button type="button" class="mic" id="micBtn" title="Speak"></button>
-          <button class="btn primary">File it</button>
+          <button class="send">File</button>
         </form>
-        <div class="capture-hint" id="captureHint">Type or speak. Higgins works out where it belongs, and you confirm before it's saved.</div>
+        <div class="capture-hint" id="captureHint">Say or type anything. Higgins files it — tap Move if it guessed wrong.</div>
+        <div class="receipts" id="receipts"></div>
       </div>
       <div id="view"></div>
     </main>
