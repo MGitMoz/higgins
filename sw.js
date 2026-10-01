@@ -1,6 +1,6 @@
 /* Network-first for the app shell so new releases show up right away; cache is the offline fallback.
    Bump CACHE on each release to clear old files. */
-const CACHE = 'higgins-v0.4';
+const CACHE = 'higgins-v0.5';
 const SHELL = ['./', './index.html', './app.js', './styles.css', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-180.png'];
 
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL))); self.skipWaiting(); });

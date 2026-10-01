@@ -1,4 +1,4 @@
-/* Higgins — family command center. v0.4
+/* Higgins — family command center. v0.5
    Single-page app, no build step. All data lives in localStorage under STORE_KEY. */
 'use strict';
 
@@ -140,7 +140,7 @@ function seedState() {
   }));
   return {
     version: VERSION,
-    settings: { familyName: '', theme: 'light', weeklyGoal: 30 },
+    settings: { familyName: '', theme: 'light', weeklyGoal: 30, aiModel: 'haiku', aiCap: 0 },
     members, activeMember: members[0].id,
     tasks, log: [], vehicles: [car], bills: [],
     estate: {
@@ -473,7 +473,15 @@ function logTaskDone(task) {
 /* ---------- AI filing (Claude). The key lives only in this browser, never in backups or the repo. ---------- */
 const AI_KEY_STORE = 'higgins.anthropicKey';
 const SDK_URL = 'https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.129.0/+esm';
-const AI_MODEL = 'claude-opus-5-5';
+// Prices are $ per million tokens (input / output), used for the in-app spending estimate.
+const AI_MODELS = {
+  haiku: { id: 'claude-haiku-4-5', label: 'Haiku 4.5 — economy (~0.3¢ a note)', inPrice: 1, outPrice: 5 },
+  opus: { id: 'claude-opus-5-5', label: 'Opus 5.5 — best understanding (~1–2¢ a note)', inPrice: 4, outPrice: 20 },
+};
+const aiModelKey = () => AI_MODELS[state.settings.aiModel] ? state.settings.aiModel : 'haiku';
+const thisMonth = () => today().slice(0, 7);
+function aiUsage() { if (!state.aiUsage || state.aiUsage.month !== thisMonth()) state.aiUsage = { month: thisMonth(), notes: 0, cost: 0 }; return state.aiUsage; }
+const overAICap = () => (state.settings.aiCap || 0) > 0 && aiUsage().cost >= state.settings.aiCap;
 const getAIKey = () => { try { return localStorage.getItem(AI_KEY_STORE) || ''; } catch { return ''; } };
 const setAIKey = k => { try { if (k) localStorage.setItem(AI_KEY_STORE, k); else localStorage.removeItem(AI_KEY_STORE); } catch { /* storage blocked */ } };
 let Anthropic = null, aiClient = null, aiClientKey = '';
@@ -526,13 +534,13 @@ function aiContext() {
 }
 async function aiInterpret(text) {
   const client = await getAIClient(); if (!client) throw new Error('no-key');
-  const res = await client.beta.messages.create({
-    model: AI_MODEL, max_tokens: 4000,
-    betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default',
-    output_config: { effort: 'low', format: { type: 'json_schema', schema: AI_SCHEMA } },
-    system: AI_SYSTEM,
-    messages: [{ role: 'user', content: `Household context:\n${aiContext()}\n\nNote:\n${text}` }],
-  });
+  const key = aiModelKey(), model = AI_MODELS[key];
+  const base = { model: model.id, max_tokens: 4000, system: AI_SYSTEM, messages: [{ role: 'user', content: `Household context:\n${aiContext()}\n\nNote:\n${text}` }] };
+  // Opus: low effort + server-side refusal fallback. Haiku 4.5 takes neither, so it uses the plain endpoint.
+  const res = key === 'opus'
+    ? await client.beta.messages.create({ ...base, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default', output_config: { effort: 'low', format: { type: 'json_schema', schema: AI_SCHEMA } } })
+    : await client.messages.create({ ...base, output_config: { format: { type: 'json_schema', schema: AI_SCHEMA } } });
+  const u = aiUsage(); u.notes += 1; u.cost += ((res.usage?.input_tokens || 0) * model.inPrice + (res.usage?.output_tokens || 0) * model.outPrice) / 1e6;
   if (res.stop_reason === 'refusal') throw new Error('refusal');
   const out = JSON.parse(res.content.filter(b => b.type === 'text').map(b => b.text).join(''));
   return (out.actions || []).filter(a => AI_TYPES.includes(a.type));
@@ -553,13 +561,15 @@ function aiErrorMessage(e) {
   if (Anthropic && e instanceof Anthropic.AuthenticationError) return 'AI key was rejected — filed with quick rules. Check it under More → Family.';
   if (Anthropic && e instanceof Anthropic.PermissionDeniedError) return 'That AI key lacks permission — filed with quick rules.';
   if (Anthropic && e instanceof Anthropic.RateLimitError) return 'AI is busy right now — filed with quick rules.';
+  if (Anthropic && e instanceof Anthropic.BadRequestError && /credit balance/i.test(e.message)) return 'AI credits used up — filed with quick rules. Top up at console.anthropic.com.';
   if (Anthropic && e instanceof Anthropic.BadRequestError) return `AI request problem (${e.message.slice(0, 80)}) — filed with quick rules.`;
   if (Anthropic && e instanceof Anthropic.APIError) return `AI unavailable (${e.status || 'network'}) — filed with quick rules.`;
   return 'AI unavailable — filed with quick rules.';
 }
 function pushReceipt(r) { ui.receipts.unshift({ id: uid(), ...r }); ui.receipts = ui.receipts.slice(0, 3); }
 async function captureText(text) {
-  if (getAIKey() && navigator.onLine !== false) {
+  if (getAIKey() && overAICap() && !ui.capNoticeShown) { ui.capNoticeShown = true; toast('This month’s AI cap is reached — using quick rules'); }
+  if (getAIKey() && !overAICap() && navigator.onLine !== false) {
     const pending = { id: uid(), pending: true, summary: text, cat: 'note' };
     ui.receipts.unshift(pending); renderReceipts();
     try {
@@ -1156,10 +1166,15 @@ const views = {
         <div class="card"><div class="card-head"><h2>Milestones</h2><span class="grow"></span><span class="muted small">${Object.keys(state.milestones).length} of ${MILESTONES.length}</span></div>
           ${MILESTONES.map(m => `<div class="milestone-row"><span class="medal ${state.milestones[m.id] ? 'earned' : ''}">${icon('medal')}</span><div><div class="title" style="font-weight:500">${esc(m.name)}</div><div class="small muted">${esc(m.desc)}${state.milestones[m.id] ? ' · ' + fmtDate(state.milestones[m.id], { month: 'short', day: 'numeric', year: 'numeric' }) : ''}</div></div></div>`).join('')}</div>
         <div class="card span2"><div class="card-head"><h2>AI filing</h2><span class="grow"></span><span class="pill ${getAIKey() ? 'olive' : ''}">${getAIKey() ? 'On' : 'Off'}</span></div>
-          <p class="muted" style="margin-top:0">With AI on, Higgins reads each note with Claude — it understands typos, dates like “the 10th of each month”, reminders, and your cars and people, and writes a proper title (“Pay Highlander auto loan”). Without it, Higgins uses quick keyword rules. Each note costs roughly 1–2¢ on your Anthropic account. The note’s text and a summary of your lists are sent to Anthropic when you file; your key stays on this device and is never included in backups.</p>
+          <p class="muted" style="margin-top:0">With AI on, Higgins reads each note with Claude — it understands typos, dates like “the 10th of each month”, reminders, and your cars and people, and writes a proper title (“Pay Highlander auto loan”). Without a key, or if anything goes wrong, Higgins files with quick keyword rules instead. Your key stays on this device and is never in backups; the note and a summary of your lists are sent to Anthropic when you file.</p>
           <form data-form="aikey" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><input name="key" type="password" autocomplete="off" class="search" style="flex:1;min-width:220px" placeholder="${getAIKey() ? 'Key saved — paste a new one to replace' : 'Paste your Anthropic API key'}">
             <button class="btn primary">Save key</button>${getAIKey() ? '<button type="button" class="btn" data-act="testAI">Test</button><button type="button" class="btn ghost danger" data-act="removeAI">Remove</button>' : ''}</form>
-          <div class="small muted" style="margin-top:8px">Create a key at console.anthropic.com → API keys, and set a monthly spend limit there.</div></div>
+          <form data-form="aiprefs" class="fields" style="margin-top:14px">
+            ${fieldHTML({ key: 'aiModel', label: 'Model', type: 'select', half: true, options: Object.entries(AI_MODELS).map(([k, m]) => [k, m.label]) }, aiModelKey())}
+            ${fieldHTML({ key: 'aiCap', label: 'Monthly cap in Higgins ($, 0 = none)', type: 'number', half: true, step: '0.5', hint: 'When reached, Higgins switches to quick rules until next month.' }, state.settings.aiCap || 0)}
+            <div class="field"><button class="btn" style="align-self:flex-start">Save AI settings</button></div></form>
+          <div class="notice" style="margin-top:12px"><b>This month:</b> ${aiUsage().notes} note${aiUsage().notes === 1 ? '' : 's'} · about ${money(Math.round(aiUsage().cost * 100) / 100)} (estimated from token counts)${state.settings.aiCap ? ` of your ${money(state.settings.aiCap)} cap` : ''}</div>
+          <div class="small muted" style="margin-top:10px"><b>Keep it flat:</b> at console.anthropic.com → Billing, buy prepaid credits (e.g. $10) and leave <b>auto-reload off</b>. You can never be charged more than you prepaid — when credits run out, Higgins tells you and falls back to quick rules until you top up.</div></div>
         <div class="card span2"><div class="card-head"><h2>Your data</h2></div>
           <p class="muted" style="margin-top:0">Higgins keeps everything on this device only. Export a backup now and then (save it to Files or iCloud Drive) — it’s how you’d move to a new phone, or into sync later.</p>
           <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-act="exportData">Export backup (.json)</button><label class="btn">Import backup<input type="file" accept=".json" data-import hidden></label><span class="grow"></span><button class="btn ghost danger" data-act="resetData">Reset everything</button></div></div>
@@ -1327,6 +1342,7 @@ document.addEventListener('submit', e => {
   e.preventDefault();
   if (f === 'grocery') { const v = e.target.elements.item.value; v.split(',').forEach(s => addGrocery(s)); commit(); $('[data-form="grocery"] input')?.focus(); }
   if (f === 'aikey') { const k = e.target.elements.key.value.trim(); if (!k) return; setAIKey(k); aiClient = null; toast('Key saved — AI filing is on'); render(); return; }
+  if (f === 'aiprefs') { const el = e.target.elements; state.settings.aiModel = el.aiModel.value; state.settings.aiCap = Math.max(0, Number(el.aiCap.value) || 0); ui.capNoticeShown = false; toast('AI settings saved'); commit(); return; }
   if (f === 'settings') { const el = e.target.elements; Object.assign(state.settings, { familyName: el.familyName.value.trim(), weeklyGoal: Number(el.weeklyGoal.value) || 30, theme: el.theme.value }); toast('Saved'); commit(); }
 });
 document.addEventListener('input', e => {
